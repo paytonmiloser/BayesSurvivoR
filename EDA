@@ -1,1 +1,18 @@
 #R Code for analysis
+
+#Load in the data
+getwd()
+setwd("C:/Users/pmilo/OneDrive/Desktop/iowa state university/Grad School Year 3/Spring 2025/STAT 544 - BAYES/Group Project- Anna & Sabrina & me")
+
+numsheets <- length(excel_sheets("survivoR.xlsx")) 
+
+# Get the sheet names
+sheet_names <- excel_sheets("survivoR.xlsx")
+
+# Read each sheet into a list of data frames
+df_list <- lapply(sheet_names, function(x) read_excel("survivoR.xlsx", sheet = x))
+
+# Assign each data frame to the global environment using the sheet names
+names(df_list) <- sheet_names
+list2env(df_list, envir = .GlobalEnv)
+

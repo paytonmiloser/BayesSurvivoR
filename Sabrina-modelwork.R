@@ -80,15 +80,101 @@ uscast_detail <- uscast_detail %>%
   ungroup()
 head(uscast_detail$ethnicity) #categories including dual-combinations of each
 
-#########################################################
+############################################################
 
-#Creating column of whether the castaway had a nickname used instead of real name (ex: Johnny Fairplay)
+#Create a column for total number of advantage for each US season
 
-########################################################
+library(dplyr)
+library(tidyr)
+library(stringr)
+advantage_details <- df_list[["Advantage Details"]]
 
-#Creating an "age when playing" column
-#Exists in Castaways
+#filter only US
+us_advantages <- advantage_details %>%
+  filter(str_starts(version_season, "US"))
 
-#######################################################
+advantage_counts <- us_advantages %>%
+  count(version_season, name = "total_advantages")
 
-#Advantage movement: if they played their advantage for themselves
+all_us_seasons <- tibble(version_season = paste0("US", 1:48))
+
+advantages_per_us_season <- all_us_seasons %>%
+  left_join(advantage_counts, by = "version_season") %>%
+  replace_na(list(total_advantages = 0))
+
+#############################################################
+
+#T/F if a castaway found an advantage
+
+advantage_movement<-df_list[["Advantage Movement"]]
+
+#filter only US
+us_advantage_movement <- advantage_movement %>%
+  filter(str_starts(version_season, "US"))
+us_advantage_movement
+
+#only include desired events of finding/interacting with an idol
+events_of_interest <- c("Found", "Received", "Found (beware)", "Recieved", 
+                        "Found (Beware)", "Bought", "Won", "Stolen")
+filtered_advantage_movement <- us_advantage_movement %>%
+  filter(event %in% events_of_interest)
+
+#Get castaway IDs who found an advantage
+castawayid_advantages <- us_advantage_movement %>%
+  filter(event %in% events_of_interest) %>%
+  pull(castaway_id) %>%
+  unique()
+castawayid_advantages
+
+#Create the T/F column, put into "Castaways" sheet
+castaways<-df_list[["Castaways"]]
+castaways <- castaways %>%
+  mutate(got_advantage = castaway_id %in% castawayid_advantages)
+
+head(castaways$got_advantage)
+
+#######################################################################
+
+#T/F if they played an advantage for themselves
+
+library(dplyr)
+
+us_advantage_movement <- advantage_movement %>%
+  filter(str_starts(version_season, "US")) %>%
+  mutate(
+    played_for_self = if_else(
+      event == "Played" & castaway == played_for,
+      TRUE,
+      FALSE
+    )
+  )
+us_advantage_movement$played_for_self
+
+#########################################################################
+
+#True/False for nickname
+
+library(dplyr)
+library(stringr)
+
+uscast_detail <- uscast_detail %>%
+  mutate(
+    first_name = word(full_name, 1),
+    nickname = first_name != castaway
+  ) %>%
+  select(-first_name)
+uscast_detail$nickname
+
+####################################################################
+
+#Now pull other prior information we'll be using from Advantage Details, Advantage Movement, and Castaway Details
+
+#Advantage Details
+
+#Advantage Movement
+advantage_success<-us_advantage_movement$success
+
+#Castaway Details
+gender<-uscast_detail$gender
+lgbt<-uscast_detail$lgbt
+                           

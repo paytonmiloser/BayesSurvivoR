@@ -24,16 +24,17 @@ head(df_list)
 names(df_list) <- sheet_names
 list2env(df_list, envir = .GlobalEnv)
 
+
 #Want everyone separated by castaway score
 cast_detail<-df_list[["Castaway Details"]]
 identifiers<-cast_detail$castaway_id
 
 #Remove non-US castaways
 uscast_detail <- cast_detail[grepl("^US", cast_detail$castaway_id), ]
-uscast_detail
+#uscast_detail
 
 #verifies that it is only US castaways
-head(uscast_detail)
+#head(uscast_detail)
 
 #####################################
 
@@ -118,26 +119,125 @@ kable(summary_stats, format = "latex", caption = "Summary Statistics")
 ##                  challenge_type + result _> to showcase individual wins, 
 ##                  tribe wins, which result in rewards or immunity 
 
-#########################
-
-# New column: 
-#             outcome type >- Sum of individual wins (for each castaway)
-#             outcome type >- Sum of Tribe wins
-#             Sum "chosen_for_reward" for the castaway
-###################
-
 ########################
 
+#Get challenge Results data
+# First ensure we have only US castaways (one-time filter)
+us_challenge_results <- df_list[["Challenge Results"]] %>% 
+  filter(str_starts(castaway_id, "US"))
+
+# Calculate wins - using precise categorization
+challenge_wins <- us_challenge_results %>%
+  mutate(
+    # Categorize win types
+    individual_win = outcome_type == "Individual" & result == "Won",
+    tribal_win = outcome_type == "Tribal" & result == "Won",
+    
+    # Further break down by challenge purpose
+    individual_reward = individual_win & challenge_type == "Reward",
+    individual_immunity = individual_win & challenge_type == "Immunity",
+    tribal_immunity = tribal_win & challenge_type %in% c("Immunity", "Immunity and Reward")
+  ) %>%
+  group_by(castaway_id) %>%
+  summarise(
+    # Individual wins
+    total_individual_wins = sum(individual_win, na.rm = TRUE),
+    reward_challenge_wins = sum(individual_reward, na.rm = TRUE),
+    immunity_challenge_wins = sum(individual_immunity, na.rm = TRUE),
+    
+    # Tribal wins
+    total_tribal_wins = sum(tribal_win, na.rm = TRUE),
+    tribal_immunity_wins = sum(tribal_immunity, na.rm = TRUE),
+    
+    # Combined metrics
+    total_wins = total_individual_wins + total_tribal_wins,
+    .groups = "drop"
+  )
+
+# Merge with castaway details
+castaway_performance <- df_list[["Castaway Details"]] %>%
+  filter(str_starts(castaway_id, "US")) %>%
+  left_join(challenge_wins, by = "castaway_id") %>%
+  mutate(across(contains("wins"), ~replace_na(., 0))) %>%
+  select(
+    castaway_id, 
+    full_name,
+    contains("individual"),
+    contains("tribal"),
+    contains("reward"),
+    contains("immunity"),
+    total_wins
+  )
+
+# View results
+castaway_performance %>% arrange(desc(total_wins)) %>% head(10)
+  
+# Calculate total times chosen for reward 
+chosen_reward_totals <- df_list[["Challenge Results"]] %>%
+  filter(str_starts(castaway_id, "US")) %>%  # US seasons only
+  group_by(castaway_id) %>%
+  summarise(
+    times_chosen_for_reward = sum(chosen_for_reward == TRUE, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Merge with existing performance data
+castaway_performance <- castaway_performance %>%
+  left_join(chosen_reward_totals, by = "castaway_id") %>%
+  mutate(times_chosen_for_reward = replace_na(times_chosen_for_reward, 0))
+
+# Verify new column
+view(castaway_performance)
+
+############## Summary stats
+# Summary Statistics Table
+# Season-Specific Summary Statistics
+season_stats <- castaway_performance %>%
+  left_join(
+    df_list[["Castaways"]] %>% 
+      filter(str_starts(castaway_id, "US")) %>%
+      distinct(castaway_id, season),
+    by = "castaway_id"
+  ) %>%
+  group_by(season) %>%
+  summarise(
+    # Individual Wins
+    Mean_Individual = mean(total_individual_wins, na.rm = TRUE),
+    Median_Individual = median(total_individual_wins, na.rm = TRUE),
+    SD_Individual = sd(total_individual_wins, na.rm = TRUE),
+    
+    # Tribal Wins
+    Mean_Tribal = mean(total_tribal_wins, na.rm = TRUE),
+    Median_Tribal = median(total_tribal_wins, na.rm = TRUE),
+    SD_Tribal = sd(total_tribal_wins, na.rm = TRUE),
+    
+    # Total Wins
+    Mean_Total = mean(total_wins, na.rm = TRUE),
+    Median_Total = median(total_wins, na.rm = TRUE),
+    SD_Total = sd(total_wins, na.rm = TRUE),
+    
+    # Chosen for Reward
+    Mean_Chosen = mean(times_chosen_for_reward, na.rm = TRUE),
+    Median_Chosen = median(times_chosen_for_reward, na.rm = TRUE),
+    SD_Chosen = sd(times_chosen_for_reward, na.rm = TRUE),
+    
+    # Counts
+    N_Castaways = n(),
+    .groups = "drop"
+  )
+
+# View season-specific results
+season_stats %>%
+  gt::gt() %>%
+  gt::fmt_number(decimals = 2) %>%
+  gt::tab_header(
+    title = "Season-by-Season Challenge Performance",
+    subtitle = "Average wins per castaway by season"
+  )
 
 # Seasons Summary : Winner_ID
-# From Jury Votes: Get Finalist_ID to use as an identifier. 
 
 #########################
-
-
-
-
-
 
 #### Remove unnecessary columns 
 

@@ -205,3 +205,36 @@ head(merged_data)
 
 library(writexl)
 write_xlsx(merged_data, path = "merged_survivor_data.xlsx")
+
+
+
+
+#######################################################################################################
+#Fixing final dataset
+
+library(readxl)
+library(dplyr)
+library(writexl)
+
+finaldata_path <- "C:/Users/sabri/OneDrive - Iowa State University/Documents/BayesSurvivoR/merged_survivor_data_complete.xlsx"
+final_data <- read_excel(finaldata_path)
+
+final_data <- final_data %>%
+  mutate(version_season = as.character(version_season))
+
+early_seasons <- paste0("US", 1:10)
+
+
+final_data <- final_data %>%
+  mutate(
+    total_advantages = ifelse(version_season %in% early_seasons & is.na(total_advantages), 0, total_advantages),
+    success = ifelse(is.na(success) | trimws(success) == "", NA, success),
+    played_for_self = ifelse(is.na(played_for_self) | trimws(played_for_self) == "", NA, played_for_self),
+    got_advantage = ifelse(version_season %in% early_seasons, FALSE, got_advantage),
+    success = ifelse(version_season %in% early_seasons, NA, success),
+    played_for_self = ifelse(version_season %in% early_seasons, NA, played_for_self)
+  )
+
+write_xlsx(final_data, "C:/Users/sabri/OneDrive - Iowa State University/Documents/BayesSurvivoR/merged_survivor_data_cleaned.xlsx")
+
+

@@ -80,7 +80,7 @@ uscast_detail <- uscast_detail %>%
   ungroup()
 head(uscast_detail$ethnicity) #categories including dual-combinations of each
 
-############################################################
+#########################################################
 
 #Create a column for total number of advantage for each US season
 
@@ -102,38 +102,38 @@ advantages_per_us_season <- all_us_seasons %>%
   left_join(advantage_counts, by = "version_season") %>%
   replace_na(list(total_advantages = 0))
 
-#############################################################
+#######################################################################
 
-#T/F if a castaway found an advantage
+library(dplyr)
+library(stringr)
 
-advantage_movement<-df_list[["Advantage Movement"]]
+# Load in data
+castaways <- df_list[["Castaways"]]
+advantage_movement <- df_list[["Advantage Movement"]]
 
-#filter only US
+# Filter advantage movement to only US seasons
 us_advantage_movement <- advantage_movement %>%
   filter(str_starts(version_season, "US"))
-us_advantage_movement
 
-#only include desired events of finding/interacting with an idol
+# Define events of interest
 events_of_interest <- c("Found", "Received", "Found (beware)", "Recieved", 
                         "Found (Beware)", "Bought", "Won", "Stolen")
-filtered_advantage_movement <- us_advantage_movement %>%
-  filter(event %in% events_of_interest)
 
-#Get castaway IDs who found an advantage
+# Get castaway IDs for those who had advantages
 castawayid_advantages <- us_advantage_movement %>%
   filter(event %in% events_of_interest) %>%
   pull(castaway_id) %>%
   unique()
-castawayid_advantages
 
-#Create the T/F column, put into "Castaways" sheet
-castaways<-df_list[["Castaways"]]
-castaways <- castaways %>%
+# Filter US castaways based on version_season (safer)
+us_castaways <- castaways %>%
+  filter(str_starts(version_season, "US")) %>%
   mutate(got_advantage = castaway_id %in% castawayid_advantages)
 
-head(castaways$got_advantage)
+# View result
+head(us_castaways %>% select(castaway_id, version_season, got_advantage))
 
-#######################################################################
+#########################################################################
 
 #T/F if they played an advantage for themselves
 
@@ -177,4 +177,31 @@ advantage_success<-us_advantage_movement$success
 #Castaway Details
 gender<-uscast_detail$gender
 lgbt<-uscast_detail$lgbt
-                           
+
+
+#################################################################
+
+
+#Creating a new Data Frame
+
+library(dplyr)
+
+advantage_summary <- us_advantage_movement %>%
+  select(castaway_id, version_season, success, played_for_self)
+
+cast_detail_reduced <- uscast_detail %>%
+  select(castaway_id, full_name, lgbt, gender, collar, ethnicity, nickname)
+
+castaways_reduced <- us_castaways %>%
+  select(castaway_id, version_season, got_advantage)
+
+merged_data <- castaways_reduced %>%
+  left_join(cast_detail_reduced, by = "castaway_id") %>%
+  left_join(advantage_summary, by = c("castaway_id", "version_season")) %>%
+  left_join(advantages_per_us_season, by = "version_season")
+
+
+head(merged_data)
+
+library(writexl)
+write_xlsx(merged_data, path = "merged_survivor_data.xlsx")

@@ -9,6 +9,12 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 library(readxl)
 library(nimble)
+library(rstan)
+library(bayesplot)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(stringr)
 ```
 
 ```{r}
@@ -37,7 +43,7 @@ dat <- read_excel("merged_survivor_data_final.xlsx")
 STAN Model 1:
 
 ```{r}
-
+model.1 <- "
 data {
   int<lower=1> N;                  // number of contestants
   int<lower=1> S;                  // number of seasons
@@ -71,7 +77,7 @@ model {
     y[i] ~ bernoulli_logit(eta);
   }
 }
-
+"
 
 ```
 
@@ -79,6 +85,7 @@ model {
 
 Model 2:
 ```{r}
+model.2 <- "
 data {
   int<lower=1> N;
   int<lower=1> S;
@@ -145,20 +152,42 @@ model {
     y[i] ~ bernoulli_logit(eta);
   }
 }
+"
+```
 
+
+Some data manipulation pre-model run
+```{r}
+castaways <- df_list[["Castaways"]] %>% 
+  filter(str_starts(castaway_id, "US"))  # Ensure US-only
+
+# Remove duplicates based on a string column (e.g., 'name')
+df_clean <- dat |>
+  distinct(castaway_id, .keep_all = TRUE)
+
+castaways.clean <- castaways |>
+  distinct(castaway_id, .keep_all = TRUE)
+
+df_clean$result <- castaways.clean$result
+```
+
+```{r}
+S <- length(unique(dat$version_season))
+covars <- data.frame(gender=df_clean$gender, ethnicity=df_clean$ethnicity, lgbtq=df_clean$lgbt, collar=df_clean$collar)
 ```
 
 
 
 MCMC
 ```{r}
-library(rstan)
-
 # Prepare your data (example structure)
+
+covariates <- 
+
 stan_data <- list(
-  N = nrow(df),
-  S = length(unique(df$season)),
-  P = ncol(df[, covariates]),
+  N = nrow(dat),
+  S = length(unique(dat$version_season)),
+  P = ncol(dat[, covariates]),
   y = df$winner,
   X = as.matrix(df[, covariates]),
   season = as.integer(factor(df$season)),
@@ -178,9 +207,63 @@ fit <- stan(
 
 print(fit)
 
+
+#trace plots
+posterior_samples <- as.array(fit)
+
+mcmc_trace(posterior_samples, pars = c("beta[1]", "beta_z", "sigma_alpha")) +
+  ggtitle("Trace Plots: Selected Parameters")
+
+mcmc_trace(posterior_samples, regex_pars = "beta")  # all betas
+
+
+#densities
+mcmc_dens_overlay(posterior_samples, pars = c("beta[1]", "beta[2]", "beta_z")) +
+  ggtitle("Posterior Density: Key Coefficients")
+mcmc_dens_overlay(posterior_samples, regex_pars = "alpha") +
+  ggtitle("Posterior Density: Season Random Effects")
+
+
+#Autocrrelation
+mcmc_acf(posterior_samples, pars = c("beta[1]", "beta_z", "sigma_alpha")) +
+  ggtitle("Autocorrelation: Key Parameters")
+
+
+
+#ESS 
+summary_df <- summary(fit)$summary |>
+  as.data.frame() |>
+  tibble::rownames_to_column("parameter")
+
+summary_df |>
+  ggplot(aes(x = reorder(parameter, -n_eff), y = n_eff)) +
+  geom_col(fill = "skyblue") +
+  coord_flip() +
+  labs(
+    title = "Effective Sample Size per Parameter",
+    x = "Parameter",
+    y = "n_eff"
+  ) +
+  theme_minimal()
+
 ```
 
 
+```{r}
+#intervals
+mcmc_intervals(posterior_samples, regex_pars = "beta") +
+  ggtitle("Posterior Credible Intervals: β Coefficients")
+
+mcmc_intervals(posterior_samples, regex_pars = "alpha") +
+  ggtitle("Posterior Intervals: Season Random Effects")
+
+```
+
+```{r}
+rstan::summary(fit, pars = c("beta", "beta_z", "sigma_alpha", "sigma_z"))$summary |>
+  round(2)
+
+```
 
 
 
@@ -290,5 +373,6 @@ df_z |>
   ) +
   theme_light()
 ```
+
 
 

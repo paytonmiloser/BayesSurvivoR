@@ -211,26 +211,41 @@ table(advantage.clean.moves$event)
 #played 153/230 idols found
 table(advantage.clean.moves$version_season, advantage.clean.moves$event=="Played")
 
+tab <- table(
+  advantage.clean.moves$version_season,
+  advantage.clean.moves$event == "Played"
+)
+
+# Convert to data frame
+latvar <- as.data.frame.matrix(tab)
+
+latvar$version_season <- rownames(latvar)
+
+# Rearrange columns if needed
+latvar <- latvar[, c("version_season", "FALSE", "TRUE")]
+
+# Optionally rename columns for clarity
+names(latvar)[2:3] <- c("not_played", "played")
+
 ```
 
 ```{r}
 S <- length(unique(dat$version_season))
 
 covars <- data.frame(ID=df_clean$castaway_id, Season=df_clean$version_season,gender=df_clean$gender, ethnicity=df_clean$ethnicity, lgbtq=df_clean$lgbt, collar=df_clean$collar, winner=df_clean$winner, game_duration=df_clean$game_duration, tribe=df_clean$n_tribe, tribe_challenge_wins=df_clean$n_tribal_challenges, individual_challenge_wins=df_clean$n_individual_challenges, times_immunity_won=df_clean$n_immunity_challenges)
+
+
 ```
 
 
 
 MCMC
 ```{r}
-# Prepare your data (example structure)
-
-covariates <- 
-
+# Prepare your data
 stan_data <- list(
   N = nrow(df_clean),
   S = S,
-  P = ncol(dat[, covariates]),
+  P = ncol(covars),
   y = df$winner,
   X = as.matrix(df[, covariates]),
   season = as.integer(factor(df$season)),

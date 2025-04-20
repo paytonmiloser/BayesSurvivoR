@@ -1,0 +1,294 @@
+---
+title: "Bayes Final Project"
+author: "Payton Miloser"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readxl)
+library(nimble)
+```
+
+```{r}
+#Load in the data
+getwd()
+setwd("C:/Users/pmilo/OneDrive/Desktop/iowa state university/Grad School Year 3/Spring 2025/STAT 544 - BAYES/Group Project- Anna & Sabrina & me")
+
+numsheets <- length(excel_sheets("survivoR.xlsx")) 
+sheet_names <- excel_sheets("survivoR.xlsx")
+
+# Read each sheet into a list of data frames
+df_list <- lapply(sheet_names, function(x) read_excel("survivoR.xlsx", sheet = x))
+
+# Assign each data frame to the global environment using the sheet names
+names(df_list) <- sheet_names
+list2env(df_list, envir = .GlobalEnv)
+```
+
+
+```{r}
+#combine data sets and get variables we need
+dat <- read_excel("merged_survivor_data_final.xlsx")
+```
+
+
+STAN Model 1:
+
+```{r}
+
+data {
+  int<lower=1> N;                  // number of contestants
+  int<lower=1> S;                  // number of seasons
+  int<lower=1> P;                  // number of predictors
+  int<lower=0, upper=1> y[N];      // outcome: win (1) or not (0)
+  matrix[N, P] X;                  // covariate matrix
+  int<lower=1, upper=S> season[N]; // season for each contestant
+}
+
+parameters {
+  real beta_0;
+  vector[P] beta;
+  real<lower=0> sigma_alpha;
+  vector[S] alpha_raw;
+}
+
+transformed parameters {
+  vector[S] alpha = sigma_alpha * alpha_raw;
+}
+
+model {
+  // Priors
+  beta ~ normal(0, 1);         // consider adjusting scale
+  beta_0 ~ normal(0, 1);
+  alpha_raw ~ normal(0, 1);    // non-centered
+  sigma_alpha ~ cauchy(0, 2.5);
+
+  // Likelihood
+  for (i in 1:N) {
+    real eta = beta_0 + X[i] * beta + alpha[season[i]];
+    y[i] ~ bernoulli_logit(eta);
+  }
+}
+
+
+```
+
+
+
+Model 2:
+```{r}
+data {
+  int<lower=1> N;
+  int<lower=1> S;
+  int<lower=1> P;
+  int<lower=0, upper=1> y[N];
+  matrix[N, P] X;
+  int<lower=1, upper=S> season[N];
+  int<lower=0> f[N]; // idols found
+  int<lower=0> u[N]; // idols used (<= f)
+}
+
+parameters {
+  // Win model
+  real beta_0;
+  vector[P] beta;
+  real beta_z;
+
+  // Random effects
+  real<lower=0> sigma_alpha;
+  vector[S] alpha_raw;
+
+  // Latent variable
+  vector[N] z;
+  real<lower=0> sigma_z;
+  vector[S] mu;
+
+  // Idol model
+  real delta_0;
+  real delta_1;
+  real zeta_0;
+  real zeta_1;
+}
+
+transformed parameters {
+  vector[S] alpha = sigma_alpha * alpha_raw;
+}
+
+model {
+  // Priors
+  beta ~ normal(0, 1);
+  beta_0 ~ normal(0, 1);
+  beta_z ~ normal(0, 1);
+
+  alpha_raw ~ normal(0, 1);
+  sigma_alpha ~ cauchy(0, 2.5);
+
+  mu ~ normal(0, 1);
+  z ~ normal(mu[season], sigma_z);
+  sigma_z ~ cauchy(0, 2.5);
+
+  delta_0 ~ normal(0, 1);
+  delta_1 ~ normal(0, 1);
+  zeta_0 ~ normal(0, 1);
+  zeta_1 ~ normal(0, 1);
+
+  // Likelihoods
+  for (i in 1:N) {
+    // idol counts (latent structure)
+    f[i] ~ poisson_log(delta_0 + delta_1 * z[i]);
+    u[i] ~ binomial_logit(f[i], zeta_0 + zeta_1 * z[i]);
+
+    // win model
+    real eta = beta_0 + X[i] * beta + beta_z * z[i] + alpha[season[i]];
+    y[i] ~ bernoulli_logit(eta);
+  }
+}
+
+```
+
+
+
+MCMC
+```{r}
+library(rstan)
+
+# Prepare your data (example structure)
+stan_data <- list(
+  N = nrow(df),
+  S = length(unique(df$season)),
+  P = ncol(df[, covariates]),
+  y = df$winner,
+  X = as.matrix(df[, covariates]),
+  season = as.integer(factor(df$season)),
+  f = df$idol_found,
+  u = df$idol_used
+)
+
+# Fit the model
+fit <- stan(
+  file = "model2_survivor.stan",  # Replace with correct path
+  data = stan_data,
+  iter = 2000,
+  chains = 4,
+  cores = 4,
+  seed = 123
+)
+
+print(fit)
+
+```
+
+
+
+
+
+Some visuals:
+```{r}
+library(dplyr)
+library(ggplot2)
+
+df |>
+  group_by(gender) |>
+  summarise(
+    n = n(),
+    win_rate = mean(winner)
+  ) |>
+  ggplot(aes(x = gender, y = win_rate)) +
+  geom_col(fill = "steelblue") +
+  geom_text(aes(label = scales::percent(win_rate)), vjust = -0.5) +
+  labs(
+    title = "Proportion of Winners by Gender",
+    x = "Gender",
+    y = "Proportion Winning"
+  ) +
+  ylim(0, 1) +
+  theme_minimal()
+```
+
+
+
+Posterior Pred draws:
+```{r}
+
+# Suppose X is your covariate matrix and post is posterior samples
+# You want to simulate probabilities: logit^-1(Xβ + α_s)
+
+library(bayesplot)
+
+posterior_probs <- rstan::extract(fit)$beta  # or use posterior_epred if using brms
+
+mcmc_areas(
+  as.matrix(posterior_probs),
+  pars = colnames(df[, covariates]),
+  prob = 0.8
+) +
+  labs(
+    title = "Posterior Distributions of Covariate Effects",
+    subtitle = "80% credible intervals"
+  )
+```
+
+
+Random season effects:
+```{r}
+alpha_samples <- rstan::extract(fit)$alpha
+season_names <- unique(df$season)
+
+season_summary <- apply(alpha_samples, 2, function(x) {
+  c(median = median(x), lower = quantile(x, 0.1), upper = quantile(x, 0.9))
+}) |>
+  t() |>
+  as.data.frame() |>
+  mutate(season = season_names)
+
+ggplot(season_summary, aes(x = reorder(season, median), y = median)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2) +
+  labs(
+    title = "Estimated Season-Level Effects (α_s)",
+    x = "Season",
+    y = "Season Random Effect (log-odds)"
+  ) +
+  theme_minimal() +
+  coord_flip()
+```
+
+
+
+Latent Var:
+```{r}
+z_post <- rstan::extract(fit)$z
+z_median <- apply(z_post, 2, median)
+
+df_z <- df |>
+  mutate(z_est = z_median)
+
+ggplot(df_z, aes(x = idol_found, y = z_est)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "lm", se = FALSE, color = "tomato") +
+  labs(
+    title = "Latent Trait vs. Number of Idols Found",
+    x = "Idols Found",
+    y = "Estimated Idol Proficiency (z_i)"
+  ) +
+  theme_minimal()
+```
+
+Win Prob vs latent:
+```{r}
+df_z |>
+  mutate(pred_prob = plogis(z_est * mean(rstan::extract(fit)$beta_z))) |>
+  ggplot(aes(x = z_est, y = pred_prob)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "loess", se = TRUE) +
+  labs(
+    title = "Probability of Winning vs. Estimated Idol Proficiency",
+    x = "Latent Idol Trait (z_i)",
+    y = "Predicted Probability of Winning"
+  ) +
+  theme_light()
+```
+
+

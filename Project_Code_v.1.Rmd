@@ -168,12 +168,55 @@ df_clean <- dat |>
 castaways.clean <- castaways |>
   distinct(castaway_id, .keep_all = TRUE)
 
+advantage.clean <- df_list[["Advantage Details"]] %>% 
+  filter(str_starts(version_season, "US"))
+
+advantage.clean.moves <- df_list[["Advantage Movement"]] %>% 
+  filter(str_starts(version_season, "US"))
+
+
+
 df_clean$result <- castaways.clean$result
+
+df_clean$winner <- ifelse(df_clean$result=="Sole Survivor",1,0)
+
+df_clean$jury <- ifelse(castaways.clean$jury =="TRUE",1,0)
+
+
+
+
+df_clean$game_duration <- castaways.clean$day
+table(advantage.clean$advantage_type, advantage.clean$version_season)
+
+df_clean$n_immunitys_possible <- df_clean$n_immunitys_possible <- case_when(
+  df_clean$version_season < "US11" ~ 0,
+  df_clean$version_season %in% c("US11","US12", "US13") ~ 1,
+  df_clean$version_season %in% c("US15", "US17", "US18", "US21", "US23", "US27" ) ~ 2,
+  df_clean$version_season %in% c("US14", "US16", "US22", "US24", "US25") ~ 3,
+  df_clean$version_season %in% c("US19", "US30", "US32") ~ 4,
+  df_clean$version_season %in% c("US26", "US29", "US31") ~ 5,
+  df_clean$version_season %in% c("US20", "US28", "US48") ~ 6,
+  df_clean$version_season %in% "US33" ~ 7,
+  df_clean$version_season %in% c("US34", "US46") ~ 8,
+  df_clean$version_season %in% c("US37", "US41", "US43") ~ 9,
+  df_clean$version_season %in% c("US35", "US36", "US45") ~ 10,
+  df_clean$version_season %in% c("US38", "US42", "US44" ) ~ 11,
+  df_clean$version_season %in% "US47" ~ 13,
+  df_clean$version_season %in% "US39" ~ 14,
+  df_clean$version_season %in% "US40" ~ 17,
+  TRUE ~ NA_integer_
+)
+
+table(advantage.clean.moves$event)
+#played 153/230 idols found
+table(advantage.clean.moves$version_season, advantage.clean.moves$event=="Played")
+
 ```
 
 ```{r}
 S <- length(unique(dat$version_season))
-covars <- data.frame(gender=df_clean$gender, ethnicity=df_clean$ethnicity, lgbtq=df_clean$lgbt, collar=df_clean$collar)
+
+covars <- data.frame(ID=df_clean$castaway_id, Season=df_clean$version_season,gender=df_clean$gender, ethnicity=df_clean$ethnicity, lgbtq=df_clean$lgbt, collar=df_clean$collar, winner=df_clean$winner, game_duration=df_clean$game_duration, tribe=df_clean$n_tribe, tribe_challenge_wins=df_clean$n_tribal_challenges, individual_challenge_wins=df_clean$n_individual_challenges, times_immunity_won=df_clean$n_immunity_challenges)
 ```
 
 
@@ -185,8 +228,8 @@ MCMC
 covariates <- 
 
 stan_data <- list(
-  N = nrow(dat),
-  S = length(unique(dat$version_season)),
+  N = nrow(df_clean),
+  S = S,
   P = ncol(dat[, covariates]),
   y = df$winner,
   X = as.matrix(df[, covariates]),
@@ -373,6 +416,5 @@ df_z |>
   ) +
   theme_light()
 ```
-
 
 

@@ -1,0 +1,202 @@
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readxl)
+library(ggplot2)
+library(dplyr)
+library(tidyverse)
+library(writexl)
+library(brms)
+library(bayesplot)
+library(brms)
+library(future)
+setwd("~/Desktop/Bayesian/project")
+```
+
+# Load and Clean Data
+
+```{r}
+setwd("~/Desktop/Bayesian/project")
+survivor_data <- read_excel("merged_survivor_data_final.xlsx")
+
+survivor_data <- survivor_data %>%
+  mutate(
+    success_clean = case_when(
+      success == "Yes" ~ 1L,
+      success == "No" ~ 0L,
+      TRUE ~ NA_integer_
+    ),
+    n_finalists = factor(n_finalists)
+  )
+
+table(survivor_data$success_clean, useNA = "ifany")
+table(survivor_data$n_finalists)
+```
+
+# Model 1: Without Latent Variable
+
+```{r}
+setwd("~/Desktop/Bayesian/project")
+
+fit1 <- brm(
+  formula = success_clean ~ gender + ethnicity + lgbt + collar +
+    n_individual_challenges + 
+    n_tribal_challenges +
+    n_reward_challenges +
+    n_tribe +
+    n_finalists +
+    (1 | version_season),
+  data = survivor_data,
+  family = bernoulli(),
+  prior = c(
+    prior("normal(0, 1)", class = "b"),
+    prior("normal(0, 1)", class = "Intercept"),
+    prior("cauchy(0, 1)", class = "sd")
+  ),
+  chains = 4, iter = 4000, control = list(adapt_delta = 0.95), seed = 123
+)
+```
+
+# Posterior Predictive Checks: Model 1
+
+```{r}
+ppc1 <- pp_check(fit1, type = "dens_overlay", ndraws = 100) +
+  labs(title = "PPC: Model 1", x = "Success", y = "Density") +
+  theme_classic(base_size = 12) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+ggsave("ppc_check_M1.png", ppc1, width = 7, height = 5, dpi = 300, bg = "white")
+ppc1
+
+pp_check(fit1, type = "bars", ndraws = 100)
+pp_check(fit1, type = "stat", stat = "mean", binwidth = 0.02)
+```
+
+# Prepare Data for Latent Variable Model
+
+```{r}
+setwd("~/Desktop/Bayesian/project")
+SurvivoR <- read_excel("Pays_cleaned_covars_NODUP.xlsx") %>%
+  mutate(
+    winner = as.numeric(winner == "Yes"),
+    version_season = factor(Season)
+  )
+
+latent_variable_dat <- read_excel("latent_variable_dat.xlsx") %>%
+  rename(notplayed = not_played) %>%
+  mutate(version_season = factor(version_season))
+
+valid_seasons <- intersect(levels(SurvivoR$version_season), levels(latent_variable_dat$version_season))
+
+player_data <- SurvivoR %>%
+  filter(version_season %in% valid_seasons) %>%
+  droplevels()
+
+season_idol_data <- latent_variable_dat %>%
+  filter(version_season %in% valid_seasons) %>%
+  droplevels()
+```
+
+# Model 2: With Latent Variable
+
+```{r}
+fit2 <- brm(
+  bf(
+    winner ~ gender + collar + z_proficiency + (1 | version_season),
+    family = bernoulli()
+  ) +
+  bf(
+    played ~ z_proficiency + (1 | version_season),
+    family = poisson()
+  ) +
+  bf(
+    notplayed ~ z_proficiency + (1 | version_season),
+    family = poisson()
+  ) +
+  lf(z_proficiency ~ 1 + (1 | version_season)),
+  
+  data = cbind(player_data, season_idol_data)[, unique(c(names(player_data), names(season_idol_data)))],
+  
+  chains = 4, iter = 2000, cores = 4, seed = 123,
+  control = list(adapt_delta = 0.95),
+  
+  prior = c(
+    prior(normal(0, 1), class = "b", resp = "winner"),
+    prior(normal(0, 1), class = "Intercept", resp = "winner"),
+    prior(normal(0, 1), class = "b", resp = "played"),
+    prior(normal(0, 1), class = "Intercept", resp = "played"),
+    prior(normal(0, 1), class = "b", resp = "notplayed"),
+    prior(normal(0, 1), class = "Intercept", resp = "notplayed"),
+    prior(exponential(1), class = "sd"),
+    prior(normal(0, 1), class = "sigma", resp = "zproficiency")
+  )
+)
+```
+```{r}
+fit2 <- brm(
+  # Use separate formulas for each response
+  bf(winner ~ gender + collar + z_proficiency + (1 | version_season), family = bernoulli()),
+  bf(played ~ z_proficiency + (1 | version_season), family = poisson()),
+  bf(notplayed ~ z_proficiency + (1 | version_season), family = poisson()),
+  lf(z_proficiency ~ 1 + (1 | version_season)),
+
+  data = cbind(player_data, season_idol_data)[, unique(c(names(player_data), names(season_idol_data)))],
+
+  chains = 4, iter = 2000, cores = 4, seed = 123,
+  control = list(adapt_delta = 0.95),
+
+  prior = c(
+    prior(normal(0, 1), class = "b", resp = "winner"),
+    prior(normal(0, 1), class = "Intercept", resp = "winner"),
+    prior(normal(0, 1), class = "b", resp = "played"),
+    prior(normal(0, 1), class = "Intercept", resp = "played"),
+    prior(normal(0, 1), class = "b", resp = "notplayed"),
+    prior(normal(0, 1), class = "Intercept", resp = "notplayed"),
+    prior(exponential(1), class = "sd"),
+    prior(normal(0, 1), class = "sigma", resp = "zproficiency")
+  )
+)
+
+```
+```{r}
+fit2 <- brm(
+  formula =
+    brms::bf(winner ~ gender + collar + z_proficiency + (1 | version_season), family = bernoulli()) +
+    brms::bf(played ~ z_proficiency + (1 | version_season), family = poisson()) +
+    brms::bf(notplayed ~ z_proficiency + (1 | version_season), family = poisson()) +
+    brms::lf(z_proficiency ~ 1 + (1 | version_season)),
+
+  data = cbind(player_data, season_idol_data)[, unique(c(names(player_data), names(season_idol_data)))],
+
+  chains = 4,
+  iter = 2000,
+  cores = 4,
+  seed = 123,
+  control = list(adapt_delta = 0.95),
+
+  prior = c(
+    prior(normal(0, 1), class = "b", resp = "winner"),
+    prior(normal(0, 1), class = "Intercept", resp = "winner"),
+    prior(normal(0, 1), class = "b", resp = "played"),
+    prior(normal(0, 1), class = "Intercept", resp = "played"),
+    prior(normal(0, 1), class = "b", resp = "notplayed"),
+    prior(normal(0, 1), class = "Intercept", resp = "notplayed"),
+    prior(exponential(1), class = "sd"),
+    prior(normal(0, 1), class = "sigma", resp = "zproficiency")
+  )
+)
+
+
+```
+
+# Posterior Predictive Checks: Model 2
+
+```{r}
+ppc2 <- pp_check(fit2, resp = "winner", type = "dens_overlay", ndraws = 100) +
+  labs(title = "PPC: Model 2 (Winner)", x = "Success", y = "Density") +
+  theme_classic(base_size = 12) +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+ggsave("ppc_check_M2.png", ppc2, width = 7, height = 5, dpi = 300, bg = "white")
+ppc2
+```

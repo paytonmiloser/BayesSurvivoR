@@ -1,0 +1,221 @@
+---
+title: "Bayesian Model Comparison - Survivor"
+author: "Anna, Sabrina, Payton"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(brms)
+```
+
+## Load and Prepare Cleaned Data
+
+```{r load-cleaned-data}
+# Set working directory
+setwd("~/Desktop/Bayesian/project")
+
+#load dataset, Make sure correct format. 
+covars <- read_excel("Pays_cleaned_covars_NODUP.xlsx") %>%
+  mutate(
+    winner = as.numeric(winner == "Yes"),
+    version_season = factor(Season),
+    gender = factor(gender),
+    ethnicity = factor(ethnicity),
+    lgbtq = factor(lgbtq),
+    collar = factor(collar),
+    tribe_challenge_wins = as.numeric(tribe_challenge_wins),
+    individual_challenge_wins = as.numeric(individual_challenge_wins),
+    times_immunity_won = as.numeric(times_immunity_won),
+    game_duration = as.numeric(game_duration)
+  ) %>%
+  drop_na(
+    winner, gender, collar, ethnicity, lgbtq,
+    game_duration, tribe_challenge_wins,
+    individual_challenge_wins, times_immunity_won
+  )
+
+
+
+
+latent <- read_excel("latent_variable_dat.xlsx") %>%
+  rename(notplayed = not_played) %>%
+  mutate(version_season = factor(version_season))
+```
+
+## Fit Model 1: Basic Hierarchical Logistic Regression
+
+```{r model1}
+options(mc.cores = parallel::detectCores())
+model1 <- brm(
+  winner ~ gender + ethnicity + lgbtq + collar + game_duration + 
+    tribe_challenge_wins +
+    individual_challenge_wins + times_immunity_won + (1 | version_season),
+  data = covars,
+  family = bernoulli(),
+  prior = c(
+    prior(normal(0, 1), class = "b"),
+    prior(normal(0, 1), class = "Intercept"),
+    prior(cauchy(0, 1), class = "sd")
+  ),
+  chains = 4, cores = 4, iter = 4000, seed = 101,
+  save_pars = save_pars(all = TRUE),
+  control = list(adapt_delta = 0.99)
+)
+```
+
+```{r}
+summary(model1)
+```
+
+```{r}
+#only for model2
+covars_binary <- covars %>%
+  mutate(
+    gender = ifelse(gender == "Male", 1, 0),
+    collar = ifelse(collar == "White", 1, 0)
+  )
+
+colnames(covars_binary)
+```
+
+
+## Fit Model 2: Latent Proficiency + Multivariate Outcome
+
+```{r model2}
+options(mc.cores = parallel::detectCores())
+model2 <- brms::brm(
+  brms::bf(
+    winner ~ b1 * gender + b2 * collar + zprof,
+    b1 + b2 + zprof ~ 1 + (1 | version_season),
+    nl = TRUE
+  ),
+  data = covars_binary,
+  family = bernoulli(),
+  prior = c(
+    prior(normal(0, 1), nlpar = "b1"),
+    prior(normal(0, 1), nlpar = "b2"),
+    prior(normal(0, 1), nlpar = "zprof")
+  ),
+  chains = 4, cores = 4, iter = 4000,
+  seed = 456,
+  save_pars = save_pars(all = TRUE),
+   # recommended for model 2 stability
+  control = list(adapt_delta = 0.99, max_treedepth = 15) 
+)
+
+```
+```{r}
+summary(model2)
+```
+
+Model 2: full model 
+```{r}
+model2_full <- brm(
+  bf(
+    winner ~ b1 * gender + b2 * collar + b3 * ethnicity + b4 * lgbtq +
+      b5 * game_duration + b6 * tribe_challenge_wins +
+      b7 * individual_challenge_wins + b8 * times_immunity_won +
+      zprof,
+    b1 + b2 + b3 + b4 + b5 + b6 + b7 + b8 + zprof ~ 1 + (1 | version_season),
+    nl = TRUE
+  ),
+  data = covars_binary,
+  family = bernoulli(),
+  prior = c(
+    prior(normal(0, 1), nlpar = "b1"),
+    prior(normal(0, 1), nlpar = "b2"),
+    prior(normal(0, 1), nlpar = "b3"),
+    prior(normal(0, 1), nlpar = "b4"),
+    prior(normal(0, 1), nlpar = "b5"),
+    prior(normal(0, 1), nlpar = "b6"),
+    prior(normal(0, 1), nlpar = "b7"),
+    prior(normal(0, 1), nlpar = "b8"),
+    prior(normal(0, 1), nlpar = "zprof")
+  ),
+  chains = 4, cores = 4, iter = 4000,
+  seed = 456,
+  save_pars = save_pars(all = TRUE),
+  control = list(adapt_delta = 0.99, max_treedepth = 15)
+)
+
+
+```
+
+
+
+
+
+## Model Comparison using Bayes Factor
+
+```{r model-comparison}
+library(bridgesampling)
+bridge1 <- bridge_sampler(model1)
+bridge2 <- bridge_sampler(model2)
+
+# Compare Model 2 to Model 1
+bf_result <- bf(bridge2, bridge1)
+bf_result
+
+bf_res2 <- bf(bridge1, bridge2)
+bf_res2
+```
+
+## Interpretation (BOOKMARK)
+
+```{r}
+# Fix factor levels across all categorical variables in your dataset
+align_factor_levels <- function(df, factor_vars) {
+  for (var in factor_vars) {
+    df[[var]] <- factor(df[[var]], levels = unique(df[[var]]))
+  }
+  return(df)
+}
+
+# Apply the fix to your dataset
+categorical_vars <- c("gender", "ethnicity", "lgbtq", "collar")
+covars <- align_factor_levels(covars, categorical_vars)
+```
+
+
+```{r}
+library(projpred)
+
+# Use your full model from brms (e.g., model1)
+#we are removing version_season as that is not needed here
+#This model will be used only for variable selection.
+model1_flat <- update(model1, formula. = ~ . - (1 | version_season))
+
+vs_model <- varsel(model1_flat, method = "forward", seed = 123)
+
+#to extract PIPs:
+library(future)
+plan(multisession, workers = parallel::detectCores() - 1)
+
+vs_model <- cv_varsel(
+  model1_flat,
+  method = "forward",
+  refit_prj = TRUE,
+  cv_method = "kfold",  # much faster!
+  K = 10,# or 5
+  ndraws = 100,  # 50–100 is often enough
+  verbose = TRUE
+)
+
+
+
+
+```
+
+
+```{r}
+plot(vs_model)
+summary(vs_model)
+vs_model$selection_frequencies
+```
+

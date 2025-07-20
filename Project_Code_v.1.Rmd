@@ -45,7 +45,7 @@ dat <- read_excel("merged_survivor_data_final.xlsx")
 
 
 
-Some data manipulation pre-model run
+#Some data manipulation pre-model run
 ```{r}
 castaways <- df_list[["Castaways"]] %>% 
   filter(str_starts(castaway_id, "US"))  # Ensure US-only
@@ -140,7 +140,7 @@ table(covars$Season)
 
 
 
-MCMC
+#MCMC
 ```{r}
 # Prepare your data
 model_dat_1 <- list(
@@ -201,8 +201,8 @@ write_xlsx(X_mat2, path="XXX.xlsx")
 
 
 
-Updated maybe working code? 9:22 pm
-WORKS 9:54 pm
+#Updated maybe working code? 9:22 pm
+#WORKS 9:54 pm
 ```{r}
 # Step 1: Set P correctly
 P <- 11  # you confirmed you only have 11 covariates
@@ -431,7 +431,7 @@ covars$idols_played <- case_when(
 
 
 
-Model 2:
+#Model 2:
 ```{r}
 # -----------------------------
 # Step 1: Prepare constants and data
@@ -633,10 +633,10 @@ for (param_name in beta_indices) {
 
 
 
-MODEL COMPARISON
+#MODEL COMPARISON
 
 
-WAIC/LOO Bar-chart: Bar‐plot of WAIC (or -2 × ELPD) for each model, ordered from best → worst.
+#WAIC/LOO Bar-chart: Bar‐plot of WAIC (or -2 × ELPD) for each model, ordered from best → worst.
 
 ```{r}
 library(nimble)
@@ -747,7 +747,7 @@ extract_loglik_matrix <- function(Cmodel, samples_mat, loglik_nodes) {
 
 
 
-MODEL 1
+#MODEL 1
 ```{r}
 
 library(nimble)
@@ -777,7 +777,7 @@ loo1 <- loo(loglik_mat1)
 ```
 
 
-MODEL 2
+#MODEL 2
 ```{r}
 Cmodel2 <- compileNimble(Rmodel2)
 samples2 <- runMCMC(

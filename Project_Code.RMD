@@ -1,0 +1,1222 @@
+---
+title: "Bayes Final Project"
+author: "Payton Miloser"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readxl)
+library(writexl)
+library(nimble)
+library(rstan)
+library(bayesplot)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(stringr)   
+library(posterior)  
+library(coda)
+```
+
+```{r}
+#Load in the data
+getwd()
+setwd("C:/Users/sabri/OneDrive - Iowa State University/Documents/IowaState/2024-2025/Bayesian/Project/Final/")
+
+numsheets <- length(excel_sheets("survivoR.xlsx")) 
+sheet_names <- excel_sheets("survivoR.xlsx")
+
+# Read each sheet into a list of data frames
+df_list <- lapply(sheet_names, function(x) read_excel("survivoR.xlsx", sheet = x))
+
+# Assign each data frame to the global environment using the sheet names
+names(df_list) <- sheet_names
+list2env(df_list, envir = .GlobalEnv)
+```
+
+Some initial EDA (no output from this required to run code after this chunk, all already included in excel sheets):
+
+```{r}
+#Want everyone separated by castaway score
+cast_detail<-df_list[["Castaway Details"]]
+identifiers<-cast_detail$castaway_id
+#Remove non-US castaways
+uscast_detail <- cast_detail[grepl("^US", cast_detail$castaway_id), ]
+uscast_detail
+
+##################################################
+
+#Separating occupations
+
+unique(uscast_detail$occupation)
+#Check how many unknown collars there are
+sum(uscast_detail$collar == "Unknown")
+#Create new df for unknown collars
+unknown_collar <- uscast_detail[uscast_detail$collar == "Unknown", ]
+#unknown_collar$occupation-- found the occupation list for the unknown collars
+library(dplyr)
+#Replace unknown with collar category
+uscast_detail <- uscast_detail %>%
+  mutate(collar = case_when(
+    collar == "Unknown" & grepl("ivy league graduate|harvard law student|law student|aspiring writer", occupation, ignore.case = TRUE) ~ "White collar",
+    collar == "Unknown" & grepl("student|dental student|retired navy seal|retired police officer|retired teacher|former navy fighter pilot|single mom|aspiring writer|ex-nfl player|retired mlb player|iraq war veteran|army veteran|air force veteran|ex-nfl player's wife;homemaker", occupation, ignore.case = TRUE) ~ "No collar",
+    TRUE ~ collar #keep original collar if not unknown
+  ))
+
+library(stringr)
+#Standardize to existing collar categories
+uscast_detail <- uscast_detail %>%
+  mutate(collar = str_to_title(collar))
+
+#Visualize for prior
+#Calculate the proportions of each collar category
+collar_distribution <- uscast_detail %>%
+  group_by(collar) %>%
+  summarise(count = n()) %>%
+  mutate(proportion = count / sum(count))
+
+library(ggplot2)
+ggplot(collar_distribution, aes(x = collar, y = proportion, fill = collar)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  labs(title = "Distribution of Collar Categories", x = "Collar", y = "Proportion")
+
+
+#########################################################
+
+#Creating ethnicity column
+
+uscast_detail <- uscast_detail %>%
+  rowwise() %>%
+  mutate(ethnicity = paste(c(
+    if (african) "African" else NULL,
+    if (asian) "Asian" else NULL,
+    if (latin_american) "Latin American" else NULL,
+    if (native_american) "Native American" else NULL
+  ),
+  collapse = "; "
+  ),
+  ethnicity = ifelse(ethnicity == "", "White", ethnicity)
+  ) %>%
+  ungroup()
+head(uscast_detail$ethnicity) #categories including dual-combinations of each
+
+#########################################################
+
+#Create a column for total number of advantage for each US season
+
+library(dplyr)
+library(tidyr)
+library(stringr)
+advantage_details <- df_list[["Advantage Details"]]
+
+#filter only US
+us_advantages <- advantage_details %>%
+  filter(str_starts(version_season, "US"))
+
+advantage_counts <- us_advantages %>%
+  count(version_season, name = "total_advantages")
+
+all_us_seasons <- tibble(version_season = paste0("US", 1:48))
+
+advantages_per_us_season <- all_us_seasons %>%
+  left_join(advantage_counts, by = "version_season") %>%
+  replace_na(list(total_advantages = 0))
+
+#############################################################
+
+#T/F if a castaway found an advantage
+
+advantage_movement<-df_list[["Advantage Movement"]]
+
+#filter only US
+us_advantage_movement <- advantage_movement %>%
+  filter(str_starts(version_season, "US"))
+us_advantage_movement
+
+#only include desired events of finding/interacting with an idol
+events_of_interest <- c("Found", "Received", "Found (beware)", "Recieved", 
+                        "Found (Beware)", "Bought", "Won", "Stolen")
+filtered_advantage_movement <- us_advantage_movement %>%
+  filter(event %in% events_of_interest)
+
+#Get castaway IDs who found an advantage
+castawayid_advantages <- us_advantage_movement %>%
+  filter(event %in% events_of_interest) %>%
+  pull(castaway_id) %>%
+  unique()
+castawayid_advantages
+
+#Create the T/F column
+castaways<-df_list[["Castaways"]]
+castaways <- castaways %>%
+  mutate(got_advantage = castaway_id %in% castawayid_advantages)
+
+# View result
+castaways$got_advantage
+
+
+library(dplyr)
+
+advantage_summary <- us_advantage_movement %>%
+  select(castaway_id, version_season, success, played_for_self)
+
+cast_detail_reduced <- uscast_detail %>%
+  select(castaway_id, full_name, lgbt, gender, collar, ethnicity, nickname)
+
+castaways_reduced <- us_castaways %>%
+  select(castaway_id, version_season, got_advantage)
+
+merged_data <- castaways_reduced %>%
+  left_join(cast_detail_reduced, by = "castaway_id") %>%
+  left_join(advantage_summary, by = c("castaway_id", "version_season")) %>%
+  left_join(advantages_per_us_season, by = "version_season")
+
+
+head(merged_data)
+
+library(writexl)
+write_xlsx(merged_data, path = "merged_survivor_data.xlsx")
+```
+
+
+
+```{r}
+#combined data sets and get variables we need
+dat <- read_excel("merged_survivor_data_final.xlsx")
+```
+
+
+Some data manipulation pre-model run
+```{r}
+castaways <- df_list[["Castaways"]] %>% 
+  filter(str_starts(castaway_id, "US"))  # Ensure US-only
+
+# Remove duplicates based on a string column (e.g., 'name')
+df_clean <- dat |>
+  distinct(version_season, castaway_id, .keep_all = TRUE)
+
+castaways.clean <- castaways |>
+   distinct(version_season, castaway_id, .keep_all = TRUE)
+
+advantage.clean <- df_list[["Advantage Details"]] %>% 
+  filter(str_starts(version_season, "US"))
+
+advantage.clean.moves <- df_list[["Advantage Movement"]] %>% 
+  filter(str_starts(version_season, "US"))
+
+
+
+cast_unique <- castaways.clean %>%
+  distinct(castaway_id, season, .keep_all = TRUE)
+
+df_clean <- df_clean %>%
+  left_join(
+    cast_unique %>% select(castaway_id, version_season, result, jury, day),
+    by = c("castaway_id", "version_season")
+  )
+
+
+
+
+
+
+df_clean$winner <- ifelse(df_clean$result=="Sole Survivor",1,0)
+
+df_clean$jury <- ifelse(df_clean$jury =="TRUE",1,0)
+
+
+df_clean$game_duration <- df_clean$day
+table(advantage.clean$advantage_type, advantage.clean$version_season)
+
+df_clean$n_immunitys_possible <- case_when(
+  df_clean$version_season < "US11" ~ 0,
+  df_clean$version_season %in% c("US11","US12", "US13") ~ 1,
+  df_clean$version_season %in% c("US15", "US17", "US18", "US21", "US23", "US27" ) ~ 2,
+  df_clean$version_season %in% c("US14", "US16", "US22", "US24", "US25") ~ 3,
+  df_clean$version_season %in% c("US19", "US30", "US32") ~ 4,
+  df_clean$version_season %in% c("US26", "US29", "US31") ~ 5,
+  df_clean$version_season %in% c("US20", "US28", "US48") ~ 6,
+  df_clean$version_season %in% "US33" ~ 7,
+  df_clean$version_season %in% c("US34", "US46") ~ 8,
+  df_clean$version_season %in% c("US37", "US41", "US43") ~ 9,
+  df_clean$version_season %in% c("US35", "US36", "US45") ~ 10,
+  df_clean$version_season %in% c("US38", "US42", "US44" ) ~ 11,
+  df_clean$version_season %in% "US47" ~ 13,
+  df_clean$version_season %in% "US39" ~ 14,
+  df_clean$version_season %in% "US40" ~ 17,
+  TRUE ~ NA_integer_
+)
+
+table(advantage.clean.moves$event)
+#played 153/230 idols found
+table(advantage.clean.moves$version_season, advantage.clean.moves$event=="Played")
+
+tab <- table(
+  advantage.clean.moves$version_season,
+  advantage.clean.moves$event == "Played"
+)
+
+# Convert to data frame
+latvar <- as.data.frame.matrix(tab)
+
+latvar$version_season <- rownames(latvar)
+
+# Rearrange columns if needed
+latvar <- latvar[, c("version_season", "FALSE", "TRUE")]
+
+# Optionally rename columns for clarity
+names(latvar)[2:3] <- c("not_played", "played")
+
+```
+
+```{r}
+covars <- data.frame(winner=df_clean$winner, ID=df_clean$castaway_id, Season=df_clean$version_season, gender=df_clean$gender, ethnicity=df_clean$ethnicity, lgbtq=df_clean$lgbt, collar=df_clean$collar, game_duration=df_clean$game_duration, tribe=df_clean$n_tribe, tribe_challenge_wins=df_clean$n_tribal_challenges, individual_challenge_wins=df_clean$n_individual_challenges, times_immunity_won=df_clean$n_immunity_challenges)
+
+write_xlsx(covars, path="Pays_cleaned_covars_NODUP.xlsx")
+write_xlsx(latvar, path="latent_variable_dat.xlsx")
+
+table(covars$Season)
+
+
+covars$total_idols <- case_when(
+  covars$Season < "US11" ~ 0,
+  covars$Season %in% c("US11", "US12", "US13") ~ 2,
+  covars$Season %in% "US27" ~ 4,
+  covars$Season %in% c("US15", "US18") ~ 5,
+  covars$Season %in% c("US16", "US17", "US22", "US23", "US25") ~ 6,
+  covars$Season %in% c("US14", "US21", "US24") ~ 7,
+  covars$Season %in% c("US19", "US30") ~ 8,
+  covars$Season %in% "US32" ~ 9,
+  covars$Season %in% c("US29", "US31") ~ 10,
+  covars$Season %in% c("US26", "US48") ~ 11,
+  covars$Season %in% "US28" ~ 12,
+  covars$Season %in% "US20" ~ 14,
+  covars$Season %in% "US34" ~ 15,
+  covars$Season %in% "US33" ~ 16,
+  covars$Season %in% "US37" ~ 18,
+  covars$Season %in% "US46" ~ 19,
+  covars$Season %in% "US36" ~ 23,
+  covars$Season %in% "US44" ~ 24,
+  covars$Season %in% c("US35", "US41") ~ 26,
+  covars$Season %in% "US43" ~ 27,
+  covars$Season %in% c("US38", "US42", "US45") ~ 28,
+  covars$Season %in% c("US39", "US47") ~ 29,
+  covars$Season %in% "US40" ~ 46,
+  TRUE ~ NA_integer_
+)
+
+covars$idols_played <- case_when(
+  covars$Season < "US11" ~ 0,
+  covars$Season %in% c("US12", "US13", "US15", "US18") ~ 0,
+  covars$Season %in% c("US11", "US16", "US17", "US23", "US24", "US32", "US46") ~ 1,
+  covars$Season %in% c("US19", "US21", "US25", "US27") ~ 2,
+  covars$Season %in% c("US14", "US22", "US29", "US48") ~ 3,
+  covars$Season %in% c("US26", "US28", "US30") ~ 4,
+  covars$Season %in% c("US31", "US41", "US45") ~ 5,
+  covars$Season %in% c("US20", "US34", "US42", "US43") ~ 6,
+  covars$Season %in% c("US33", "US36", "US38", "US44") ~ 7,
+  covars$Season %in% "US35" ~ 8,
+  covars$Season %in% c("US37", "US39", "US40") ~ 9,
+  covars$Season %in% " US47 " ~ 12,
+  TRUE ~ NA_integer_)
+
+```
+
+
+
+```{r}
+# Prepare your data
+model_dat_1 <- list(
+  N = nrow(covars),
+  P = ncol(covars[,2:12]),
+  S =  length(unique(covars$Season)),
+  y = covars$winner,
+  X = as.matrix(covars[,2:12]),
+  season = as.integer(factor(covars$Season))
+)
+
+
+# extract:
+N      <- model_dat_1$N
+P      <- model_dat_1$P
+S      <- model_dat_1$S
+Xmat   <- model_dat_1$X
+season <- model_dat_1$season
+y      <- model_dat_1$y
+y <- ifelse(is.na(y)==TRUE, 0, y)
+
+
+X = as.matrix(covars[,2:12])
+
+y_vec    <- as.numeric(model_dat_1$y)       # 0/1 → double
+X_mat    <- as.matrix(model_dat_1$X)        # should already be numeric, but just in case:
+X_mat <- data.frame(X_mat)
+
+#Format X_mat into numeric factors etc
+X_mat$ID <- as.integer(factor(X_mat$ID))
+# Now values run 1,2,3,…, up to J = number of unique players
+X_mat$Season <- as.integer(factor(X_mat$Season))
+X_mat$gender <- as.integer(factor(X_mat$gender)) #1 = female, #2 = male
+X_mat$ethnicity <- as.integer(factor(X_mat$ethnicity))
+X_mat$lgbtq <- as.integer(factor(X_mat$lgbtq))
+X_mat$collar <- as.integer(factor(X_mat$collar))
+
+X_mat    <- as.matrix(X_mat) 
+X_mat    <- matrix(as.numeric(X_mat), nrow = nrow(X_mat), ncol = ncol(X_mat))
+season <- as.numeric(model_dat_1$season)  # integer → double
+
+X_mat2 <- data.frame(X_mat)
+write_xlsx(X_mat2, path="XXX.xlsx")
+```
+
+
+Some Sensitivity Analysis (code was modified each time new parameters were tested)
+
+```{r}
+#Sensitivity Analysis, baseline
+sim <- function() {
+  beta0 <- rnorm(1, -2.8, 1)
+  beta1 <- rnorm(1, 0.5, 1)
+  X <- c(2)  # e.g., 2 challenge wins
+  p <- plogis(beta0 + beta1 * X)
+  return(p)
+}
+hist(replicate(1000, sim()), breaks = 30, col="hotpink")
+
+
+#X covariate matrix
+
+#Set filepath2 to XXX.xlsx file for wherever it is saved
+
+filepath2<-"C:/Users/sabri/OneDrive - Iowa State University/Documents/BayesSurvivoR/XXX.xlsx"
+Xmat<-read_excel(filepath2)
+Xmat
+sim <- function() {
+  beta0 <- rnorm(1, -2.8, 1)
+  beta1 <- rnorm(1, 0.5, 1)
+  X <- Xmat  # e.g., 2 challenge wins
+  p <- plogis(beta0 + beta1 %*% X)
+  return(p)
+}
+hist(replicate(1000, sim()), breaks = 30, col="hotpink")
+
+
+
+#Fixed
+Xmat <- as.matrix(read_excel(filepath2))  # Convert to matrix
+
+sim <- function() {
+  beta0 <- rnorm(1, -2.8, 1)
+  beta1 <- rnorm(ncol(Xmat), 0.5, 1)  # One beta per predictor
+  linpred <- beta0 + Xmat %*% beta1   # Linear predictor for each row
+  p <- plogis(linpred)               # Convert to probabilities
+  return(p)
+}
+
+# Now `sim()` returns a vector of probabilities, one for each row of Xmat
+hist(replicate(1000, sim()[1]), breaks = 30, col="hotpink")  # Example: first obs
+```
+
+MCMC By Hand
+
+```{r}
+# MODEL CODE FOLLOWING MCMC ALGORITHM
+
+logit <- function(p) log(p / (1 - p))
+inv_logit <- function(x) 1 / (1 + exp(-x))
+
+mcmc_sampler <- function(y, X, season_ids, n_iter = 2000, burn_in = 2000,
+                         delta_beta = 0.02, delta_alpha = 0.05, delta_sigma_alpha = 0.01,
+                         prior_mean_beta0 = logit(0.0526), prior_var_beta0 = 1,
+                         sigma_alpha_bound = 10, verbose = TRUE){ 
+
+  season_ids <- covars$Season
+  N <- length(y)
+  P <- ncol(X)
+  S <- length(unique(season_ids))
+
+  # Initialize parameters
+  beta0 <- 0
+  beta <- rep(0, P)
+  alpha <- rep(0, S)
+  sigma_alpha <- 1
+
+  # Latent variables (z_i) and season means mu_z
+  z <- rnorm(N)
+  mu_z <- tapply(z, season_ids, mean)
+  tau <- 1
+  sigma_z <- 1
+
+  # Store samples
+  out <- list(
+    beta0 = numeric(n_iter),
+    beta = matrix(0, n_iter, P),
+    alpha = matrix(0, n_iter, S),
+    sigma_alpha = numeric(n_iter),
+    z = matrix(0, n_iter, N),
+    mu_z = matrix(0, n_iter, S))
+
+  for (t in 1:n_iter) {
+
+    # --- Update beta0 ---
+    prop_beta0 <- rnorm(1, beta0, sqrt(prior_var_beta0))
+    loglik_prop <- sum(dbinom(y, 1, inv_logit(prop_beta0 + X %*% beta + alpha[season_ids]), log = TRUE))
+    logprior_prop <- dnorm(prop_beta0, prior_mean_beta0, sqrt(prior_var_beta0), log = TRUE)
+
+    loglik_curr <- sum(dbinom(y, 1, inv_logit(beta0 + X %*% beta + alpha[season_ids]), log = TRUE))
+    logprior_curr <- dnorm(beta0, prior_mean_beta0, sqrt(prior_var_beta0), log = TRUE)
+
+    log_r <- (loglik_prop + logprior_prop) - (loglik_curr + logprior_curr)
+    if (log(runif(1)) < log_r) beta0 <- prop_beta0
+
+
+    # --- Block update beta ---
+    prop_beta <- rnorm(P, beta, delta_beta)
+    eta_prop <- beta0 + X %*% prop_beta + alpha[season_ids]
+    eta_curr <- beta0 + X %*% beta + alpha[season_ids]
+    loglik_prop <- sum(dbinom(y, 1, inv_logit(eta_prop), log = TRUE))
+    loglik_curr <- sum(dbinom(y, 1, inv_logit(eta_curr), log = TRUE))
+
+    log_r <- loglik_prop - loglik_curr  # Flat priors on beta
+    if (log(runif(1)) < log_r) beta <- prop_beta
+
+    
+    # --- Update alpha_s for each season ---
+    for (s in 1:S) {
+      prop_alpha <- rnorm(1, alpha[s], delta_alpha)
+      i_s <- which(season_ids == s)
+      eta_prop <- beta0 + X[i_s, , drop = FALSE] %*% beta + prop_alpha
+      eta_curr <- beta0 + X[i_s, , drop = FALSE] %*% beta + alpha[s]
+
+      loglik_prop <- sum(dbinom(y[i_s], 1, inv_logit(eta_prop), log = TRUE))
+      loglik_curr <- sum(dbinom(y[i_s], 1, inv_logit(eta_curr), log = TRUE))
+
+      logprior_prop <- dnorm(prop_alpha, 0, sigma_alpha, log = TRUE)
+      logprior_curr <- dnorm(alpha[s], 0, sigma_alpha, log = TRUE)
+
+      log_r <- (loglik_prop + logprior_prop) - (loglik_curr + logprior_curr)
+      if (log(runif(1)) < log_r) alpha[s] <- prop_alpha
+    }
+
+    
+    # --- Update sigma_alpha ---
+    prop_sigma_alpha <- rnorm(1, sigma_alpha, delta_sigma_alpha)
+    if (prop_sigma_alpha > 0 && prop_sigma_alpha < sigma_alpha_bound) {
+      log_r <- S * log(sigma_alpha / prop_sigma_alpha) +
+        0.5 * (1 / sigma_alpha^2 - 1 / prop_sigma_alpha^2) * sum(alpha^2)
+      if (log(runif(1)) < log_r) sigma_alpha <- prop_sigma_alpha
+    }
+
+    # --- Gibbs: update mu_z for each season ---
+    for (s in 1:S) {
+      i_s <- which(season_ids == s)
+      n_s <- length(i_s)
+      v_s <- 1 / (tau^2 + n_s / sigma_z^2)
+      m_s <- v_s * sum(z[i_s]) / sigma_z^2
+      mu_z[s] <- rnorm(1, m_s, sqrt(v_s))
+    }
+
+  # --- MH updates for z_i ---
+  for (i in 1:N) {
+    prop_z <- rnorm(1, z[i], 0.1)
+    s <- season_ids[i]
+
+    logprior_prop <- dnorm(prop_z, mu_z[s], sigma_z, log = TRUE)
+    logprior_curr <- dnorm(z[i], mu_z[s], sigma_z, log = TRUE)
+
+    # Placeholder likelihood - replace with real likelihood if z affects model
+    L_prop <- 0
+    L_curr <- 0
+
+    log_r <- (logprior_prop + L_prop) - (logprior_curr + L_curr)
+    if (log(runif(1)) < log_r) z[i] <- prop_z
+    }
+    
+    # Save samples
+    out$beta0[t] <- beta0
+    out$beta[t, ] <- beta
+    out$alpha[t, ] <- alpha
+    out$sigma_alpha[t] <- sigma_alpha
+    out$z[t, ] <- z
+    out$mu_z[t, ] <- mu_z
+
+    if (verbose && t %% 500 == 0) { cat("Iteration", t, "\n")
+      }
+
+     # --- Return samples post burn-in ---
+    keep <- (burn_in + 1):n_iter
+    list(
+      beta0 = out$beta0[keep],
+      beta = out$beta[keep, , drop = FALSE],
+      alpha = out$alpha[keep, , drop = FALSE],
+      sigma_alpha = out$sigma_alpha[keep],
+      z = out$z[keep, , drop = FALSE],
+      mu_z = out$mu_z[keep, , drop = FALSE]
+    )
+  }
+}
+
+```
+
+
+MCMC (Not By-Hand)
+
+```{r}
+# Step 1: Set P correctly
+P <- 11  # you confirmed you only have 11 covariates
+
+# Step 2: Ensure X_mat only includes those 11 covariates
+# If X_mat is already correct:
+X_scaled <- scale(X_mat)  # standardize for numerical stability
+
+# Otherwise, if X_mat might have extra columns, trim it:
+# X_scaled <- scale(X_mat[, 1:11])
+data <- X_mat2
+
+constants <- list(
+  N = N,
+  P = P,
+  S = S,
+  X = X_scaled,
+  season = model_dat_1$season
+)
+
+inits <- function() {
+  list(
+    beta0 = rnorm(1, -2.5, 1),                  
+    beta = rnorm(P, 0, 1),                      
+    sigma_alpha = runif(1, 0.2, 1),           
+    alpha = rnorm(S, 0, 0.5)                  
+  )
+}
+
+
+
+# Step 3: Model definition
+model_code <- nimbleCode({
+  beta0 ~ dnorm(-2.5, 1 / 4)
+  for (j in 1:P) {
+    beta[j] ~ dnorm(0, 1)
+  }
+  sigma_alpha ~ dunif(0, 1.5)
+  
+  for (s in 1:S) {
+    alpha[s] ~ dnorm(0, sigma_alpha^2)
+  }
+
+  for (i in 1:N) {
+    eta[i] <- beta0 + inprod(beta[1:P], X[i, 1:P]) + alpha[season[i]]
+    eta_clipped[i] <- max(min(eta[i], 20), -20)  # clamp to avoid overflow
+    p[i] <- ilogit(eta_clipped[i])
+    y[i] ~ dbern(p[i])
+  }
+})
+
+
+# Step 6: Build and compile model
+Rmodel <- nimbleModel(code = model_code, data = data, constants = constants, inits = inits())
+Cmodel <- compileNimble(Rmodel)
+
+# Step 7: MCMC Configuration
+conf <- configureMCMC(Rmodel, monitors = c("beta0", "beta", "sigma_alpha", "alpha"), useConjugacy = FALSE)
+conf$removeSamplers()
+
+# Custom samplers
+conf$addSampler("beta0", type = "slice")
+
+for (j in 1:P) {
+  conf$addSampler(paste0("beta[", j, "]"), type = "RW", control = list(scale = 0.3))
+}
+
+
+conf$addSampler("alpha", type = "RW_block", control = list(scale = 0.02))
+
+conf$addSampler("sigma_alpha", type = "RW", control = list(scale = 0.01))
+
+# Step 8: Build and compile MCMC
+Rmcmc <- buildMCMC(conf)
+Cmcmc <- compileNimble(Rmcmc, project = Rmodel)
+
+# Step 9: Run MCMC
+samples <- runMCMC(Cmcmc,
+  niter             = 20000,
+  nburnin           = 2000,
+  nchains           = 4,
+  thin              = 1,
+  samplesAsCodaMCMC = TRUE,
+  setSeed           = TRUE,
+)
+
+Rmodel$calculate()
+Rmodel$logProb_y
+
+
+# Step 10: Diagnostics
+samples_mcmc <- as.mcmc.list(samples)
+
+# Summary statistics
+summary(samples)
+effectiveSize(samples)
+
+# Traceplots
+traceplot(samples[, "sigma_alpha"])
+traceplot(samples[, c("sigma_alpha", "beta0", "beta[1]", "beta[2]", "beta[3]", "beta[4]", "beta[5]", "beta[6]", "beta[7]", "beta[8]", "beta[9]", "beta[10]", "beta[11]")])
+
+
+
+
+
+# Step 1: Get variable names
+alpha_indices <- grep("^alpha\\[", varnames(samples), value = TRUE)
+
+# Step 2: Set up plotting area
+par(mfrow = c(6, 8), mar = c(2, 2, 2, 1))
+
+# Step 3: Loop through each alpha parameter and plot
+for (param_name in alpha_indices) {
+  traceplot(samples[, which(varnames(samples) == param_name)], main = param_name)
+}
+
+
+
+par(mfrow = c(3,4))
+beta_indices <- grep("^beta\\[", varnames(samples), value = TRUE)
+traceplot(samples[, "beta0"])
+for (param_name in beta_indices) {
+  traceplot(samples[, which(varnames(samples) == param_name)], main = param_name)
+}
+
+
+par(mfrow = c(3,4))
+beta_indices <- grep("^beta\\[", varnames(samples), value = TRUE)
+traceplot(samples[, "beta0"])
+for (param_name in beta_indices) {
+  acfplot(samples[, which(varnames(samples) == param_name)], main = param_name)
+}
+
+
+
+
+
+traceplot(samples[, "beta0"], main="Traceplot for beta_0")
+
+acfplot(samples[, "beta0"], main="Autocorrelation of MCMC Model 1")  # From coda
+
+
+# Extract samples for one parameter
+beta0_samples <- as.matrix(samples)[, "beta0"]
+
+# Compute running mean
+running_avg <- cumsum(beta0_samples) / seq_along(beta0_samples)
+
+# Plot
+plot(running_avg, type = "l",
+     ylab = "Running Average", xlab = "Iteration",
+     main = "Running Average of beta0")
+abline(h = mean(beta0_samples), col = "red", lty = 2)  # true mean line
+```
+
+
+
+
+
+
+```{r}
+#latvar adjustments - need to be 875 long
+
+covars$total_idols <- case_when(
+  covars$Season < "US11" ~ 0,
+  covars$Season %in% c("US11", "US12", "US13") ~ 2,
+  covars$Season %in% "US27" ~ 4,
+  covars$Season %in% c("US15", "US18") ~ 5,
+  covars$Season %in% c("US16", "US17", "US22", "US23", "US25") ~ 6,
+  covars$Season %in% c("US14", "US21", "US24") ~ 7,
+  covars$Season %in% c("US19", "US30") ~ 8,
+  covars$Season %in% "US32" ~ 9,
+  covars$Season %in% c("US29", "US31") ~ 10,
+  covars$Season %in% c("US26", "US48") ~ 11,
+  covars$Season %in% "US28" ~ 12,
+  covars$Season %in% "US20" ~ 14,
+  covars$Season %in% "US34" ~ 15,
+  covars$Season %in% "US33" ~ 16,
+  covars$Season %in% "US37" ~ 18,
+  covars$Season %in% "US46" ~ 19,
+  covars$Season %in% "US36" ~ 23,
+  covars$Season %in% "US44" ~ 24,
+  covars$Season %in% c("US35", "US41") ~ 26,
+  covars$Season %in% "US43" ~ 27,
+  covars$Season %in% c("US38", "US42", "US45") ~ 28,
+  covars$Season %in% c("US39", "US47") ~ 29,
+  covars$Season %in% "US40" ~ 46,
+  TRUE ~ NA_integer_
+)
+  
+  
+  
+covars$idols_played <- case_when(
+  covars$Season < "US11" ~ 0,
+  covars$Season %in% c("US12", "US13", "US15", "US18") ~ 0,
+  covars$Season %in% c("US11", "US16", "US17", "US23", "US24", "US32", "US46") ~ 1,
+  covars$Season %in% c("US19", "US21", "US25", "US27") ~ 2,
+  covars$Season %in% c("US14", "US22", "US29", "US48") ~ 3,
+  covars$Season %in% c("US26", "US28", "US30") ~ 4,
+  covars$Season %in% c("US31", "US41", "US45") ~ 5,
+  covars$Season %in% c("US20", "US34", "US42", "US43") ~ 6,
+  covars$Season %in% c("US33", "US36", "US38", "US44") ~ 7,
+    covars$Season %in% "US35" ~ 8,
+  covars$Season %in% c("US37", "US39", "US40") ~ 9,
+  covars$Season %in% "US47" ~ 12,
+  TRUE ~ NA_integer_
+) 
+  
+```  
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Model 2:
+```{r}
+# -----------------------------
+# Step 1: Prepare constants and data
+# -----------------------------
+
+P <- ncol(X)
+N <- nrow(X_scaled)
+S <- length(unique(X_mat2$X2))
+data <- X_mat2
+
+constants2 <- list(
+  N = N,
+  P = P,
+  S = S,
+  X = X_scaled,
+  season = model_dat_1$season
+)
+
+data2 <- list(
+  y = y,
+  f = covars$total_idols,
+  u = covars$idols_played
+)
+
+# -----------------------------
+# Step 2: Model definition (with clamped logit)
+# -----------------------------
+
+model_code2 <- nimbleCode({
+  # Priors on fixed effects
+  beta0 ~ dnorm(0, 1)
+  for (j in 1:P) {
+    beta[j] ~ dnorm(0, 1)
+  }
+  beta_z ~ dnorm(0, 1)
+
+  # Hyperpriors
+  tau ~ T(dnorm(0, 1), 0, )
+  sigma_z ~ T(dnorm(0, 1), 0, )
+  sigma_alpha ~ T(dnorm(0, 1 / 2.5^2), 0, )
+
+  # Season-level effects
+  for (s in 1:S) {
+    mu_z[s] ~ dnorm(0, 1 / tau^2)
+    alpha_raw[s] ~ dnorm(0, 1)
+    alpha[s] <- sigma_alpha * alpha_raw[s]
+  }
+
+  # Individual-level model
+  for (i in 1:N) {
+    # latent trait
+    z[i] ~ dnorm(mu_z[season[i]], 1 / sigma_z^2)
+
+    # idols found ~ Poisson
+    log(lambda[i]) <- delta0 + delta1 * z[i]
+    f[i] ~ dpois(lambda[i])
+
+    # idols played ~ Binomial
+    logit(pi[i]) <- zeta0 + zeta1 * z[i]
+    u[i] ~ dbin(pi[i], f[i])
+
+    # win model with clamped logit
+    eta[i] <- beta0 + inprod(beta[1:P], X[i, 1:P]) + beta_z * z[i] + alpha[season[i]]
+    eta_clipped[i] <- max(min(eta[i], 20), -20)
+    p[i] <- ilogit(eta_clipped[i])
+    y[i] ~ dbern(p[i])
+  }
+
+  # Priors for idol submodel
+  delta0 ~ dnorm(0, 1)
+  delta1 ~ dnorm(0, 1)
+  zeta0 ~ dnorm(0, 1)
+  zeta1 ~ dnorm(0, 1)
+})
+
+# -----------------------------
+# Step 3: Initial values
+# -----------------------------
+
+inits2 <- function() {
+  list(
+    beta0 = rnorm(1, -2.5, 1),
+    beta = rnorm(P, 0, 0.1),
+    beta_z = rnorm(1, 0, 0.1),
+    delta0 = rnorm(1, 0, 0.1),
+    delta1 = rnorm(1, 0, 0.1),
+    zeta0 = rnorm(1, 0, 0.1),
+    zeta1 = rnorm(1, 0, 0.1),
+    tau = runif(1, 0.2, 1),
+    sigma_z = runif(1, 0.2, 1),
+    sigma_alpha = runif(1, 0.2, 1),
+    mu_z = rnorm(S, 0, 0.2),
+    alpha_raw = rnorm(S, 0, 0.2),
+    z = rnorm(N, 0, 0.2)
+  )
+}
+
+# -----------------------------
+# Step 4: Build and compile model
+# -----------------------------
+
+Rmodel2 <- nimbleModel(
+  code = model_code2,
+  data = data2,
+  constants = constants2,
+  inits = inits2()
+)
+
+Cmodel2 <- compileNimble(Rmodel2)
+
+# -----------------------------
+# Step 5: Configure MCMC
+# -----------------------------
+
+conf2 <- configureMCMC(Rmodel2, monitors = c("beta0", "beta", "beta_z", "delta0", "delta1", "zeta0", "zeta1", "sigma_alpha", "tau", "sigma_z", "alpha", "mu_z", "z"))
+
+# You can customize samplers here if needed
+# conf2$removeSamplers("z")
+# conf2$addSampler(target = "z", type = "slice")
+
+Rmcmc2 <- buildMCMC(conf2)
+Cmcmc2 <- compileNimble(Rmcmc2, project = Rmodel2)
+
+# -----------------------------
+# Step 6: Run MCMC
+# -----------------------------
+
+samples2 <- runMCMC(
+  Cmcmc2,
+  niter = 20000,
+  nburnin = 1000,
+  nchains = 4,
+  thin = 1,
+  samplesAsCodaMCMC = TRUE,
+  setSeed = TRUE
+)
+
+# -----------------------------
+# Step 7: Diagnostics
+# -----------------------------
+
+summary(samples2)
+effectiveSize(samples2)
+# rhat(samples2)
+
+
+traceplot(samples2[, c("beta0", "beta[1]", "beta_z", "sigma_alpha")])
+traceplot(samples2[, "beta0"])
+
+acfplot(samples2[, "beta_z"])  # From coda
+
+
+# Extract samples for one parameter
+beta0_samples <- as.matrix(samples2)[, "beta_z"]
+
+# Compute running mean
+running_avg <- cumsum(beta0_samples) / seq_along(beta0_samples)
+
+# Plot
+plot(running_avg, type = "l",
+     ylab = "Running Average", xlab = "Iteration",
+     main = "Running Average of beta_z")
+abline(h = mean(beta0_samples), col = "red", lty = 2)  # true mean line
+
+
+
+
+
+# Step 1: Get variable names
+alpha_indices <- grep("^alpha\\[", varnames(samples2), value = TRUE)
+
+# Step 2: Set up plotting area
+par(mfrow = c(6, 8), mar = c(2, 2, 2, 1))
+
+# Step 3: Loop through each alpha parameter and plot
+for (param_name in alpha_indices) {
+  traceplot(samples2[, which(varnames(samples2) == param_name)], main = param_name)
+}
+
+
+par(mfrow = c(3,4))
+beta_indices <- grep("^beta\\[", varnames(samples2), value = TRUE)
+traceplot(samples2[, "beta0"])
+for (param_name in beta_indices) {
+  traceplot(samples2[, which(varnames(samples2) == param_name)], main = param_name)
+}
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+MODEL COMPARISON
+
+
+WAIC/LOO Bar-chart: Bar‐plot of WAIC (or -2 × ELPD) for each model, ordered from best → worst.
+
+```{r}
+library(nimble)
+library(coda)
+library(loo)
+library(matrixStats)
+
+get_log_lik_matrix_fast <- function(Rmodel, samples, compiled_model, data_node = "y") {
+  # Get full sample matrix
+  samples_mat <- as.matrix(as.mcmc.list(samples))
+  n_samples <- nrow(samples_mat)
+  log_lik_nodes <- Rmodel$expandNodeNames(data_node)
+  n_obs <- length(log_lik_nodes)
+  
+  log_lik_matrix <- matrix(NA_real_, nrow = n_samples, ncol = n_obs)
+  
+  param_names <- intersect(colnames(samples_mat), names(compiled_model$getNodeNames(includeData = FALSE)))
+
+  for (i in seq_len(n_samples)) {
+    # Vectorized assignment of parameters
+    nimble::values(compiled_model, param_names) <- samples_mat[i, param_names]
+    
+    # Calculate all likelihoods in one call
+    compiled_model$calculate(log_lik_nodes)
+    log_lik_matrix[i, ] <- compiled_model$getLogProb(log_lik_nodes)
+  }
+
+  return(log_lik_matrix)
+}
+
+
+# Compute for both models
+log_lik_model1 <- get_log_lik_matrix_fast(Rmodel, samples, Cmodel)
+log_lik_model2 <- get_log_lik_matrix(Rmodel2, samples2, Cmodel2)
+
+
+
+
+
+
+waic1 <- waic(log_lik_model1)
+waic2 <- waic(log_lik_model2)
+
+loo1 <- loo(log_lik_model1)
+loo2 <- loo(log_lik_model2)
+
+print(waic1)
+print(waic2)
+print(loo1)
+print(loo2)
+
+
+
+
+#BAYES FACTORS
+lppd1 <- sum(log(colMeans(exp(log_lik_model1))))
+lppd2 <- sum(log(colMeans(exp(log_lik_model2))))
+bf_12 <- exp(lppd1 - lppd2)
+cat("Approximate Bayes Factor (Model 1 vs Model 2):", bf_12, "\n")
+
+
+```
+
+
+
+
+
+
+```{r}
+extract_loglik_matrix <- function(Cmodel, samples_mat, loglik_nodes) {
+  n_samples <- nrow(samples_mat)
+  n_obs <- length(loglik_nodes)
+  loglik_mat <- matrix(NA_real_, nrow = n_samples, ncol = n_obs)
+
+  for (i in seq_len(n_samples)) {
+    for (param in colnames(samples_mat)) {
+      # Safely assign parameter
+      try({
+        Cmodel[[param]] <- samples_mat[i, param]
+      }, silent = TRUE)
+    }
+
+    for (j in seq_len(n_obs)) {
+      node <- loglik_nodes[j]
+      result <- try(Cmodel$calculate(node), silent = TRUE)
+
+      if (!inherits(result, "try-error") && !is.na(result)) {
+        loglik_mat[i, j] <- Cmodel$getLogProb(node)
+      } else {
+        loglik_mat[i, j] <- NA_real_
+      }
+    }
+  }
+
+  return(loglik_mat)
+}
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+MODEL 1
+```{r}
+
+library(nimble)
+library(loo)
+library(bridgesampling)
+library(coda)
+
+# Step 9: Run MCMC
+samples <- runMCMC(Cmcmc,
+  niter             = 2000,
+  nburnin           = 1000,
+  nchains           = 1,
+  thin              = 1,
+  samplesAsCodaMCMC = TRUE,
+  setSeed           = TRUE,
+)
+
+# Step 10: Diagnostics
+samples_mcmc <- as.mcmc.list(samples)
+
+samples_mat1 <- as.matrix(as.mcmc.list(samples))
+loglik_nodes1 <- Rmodel$expandNodeNames("y")  # or use full node names if needed
+loglik_mat1 <- extract_loglik_matrix(Cmodel, samples_mat1, loglik_nodes1)
+waic1 <- waic(loglik_mat1)
+loo1 <- loo(loglik_mat1)
+
+```
+
+
+MODEL 2
+```{r}
+Cmodel2 <- compileNimble(Rmodel2)
+samples2 <- runMCMC(
+  Cmcmc2,
+  niter = 2000,
+  nburnin = 1000,
+  nchains = 1,
+  thin = 1,
+  samplesAsCodaMCMC = TRUE,
+  setSeed = TRUE
+)
+
+# Step 10: Diagnostics
+samples_mcmc <- as.mcmc.list(samples2)
+
+samples_mat2 <- as.matrix(as.mcmc.list(samples2))
+loglik_nodes2 <- Rmodel2$expandNodeNames("y")  # or use full node names if needed
+loglik_mat2 <- extract_loglik_matrix(Cmodel2, samples_mat2, loglik_nodes2)
+loglik_mat2 <- ifelse(is.na(loglik_mat2), 0, loglik_mat2)
+waic2 <- waic(loglik_mat2)
+loo2 <- loo(loglik_mat2)
+
+
+```
+
+
+
+
+```{r}
+# ∆LOO and ∆WAIC (Model 2 - Model 1)
+delta_waic <- waic2$estimates["waic", "Estimate"] - waic1$estimates["waic", "Estimate"]
+delta_loo <- loo2$estimates["elpd_loo", "Estimate"] - loo1$estimates["elpd_loo", "Estimate"]
+
+cat("Delta WAIC (Model2 - Model1):", delta_waic, "\n")
+cat("Delta LOO (Model2 - Model1):", delta_loo, "\n")
+
+# 5. Approximate Bayes Factor (bridge sampling)
+bridge1 <- bridge_sampler(samples = samples_mat1, log_posterior = function(x) Cmodel$calculate(), data = list())
+bridge2 <- bridge_sampler(samples = samples_mat2, log_posterior = function(x) Cmodel2$calculate(), data = list())
+
+bf_21 <- bf(bridge2, bridge1)
+print(bf_21)
+```
+
+
+
+
+
+```{r}
+# assume you've already computed:
+# waic1 <- waic(loglik_mat1)
+# waic2 <- waic(loglik_mat2)
+
+waic1_val <- waic1$estimates["waic","Estimate"]
+waic2_val <- waic2$estimates["waic","Estimate"]
+delta_waic <- waic2_val - waic1_val
+
+BF21_waic <- exp(delta_waic / 2)
+cat("Approximate Bayes Factor (Model2 vs Model1) from WAIC:", round(BF21_waic,3), "\n")
+
+loo1_val <- loo1$estimates["elpd_loo","Estimate"]
+loo2_val <- loo2$estimates["elpd_loo","Estimate"]
+delta_loo <- loo2_val - loo1_val
+
+BF21_loo <- exp(delta_loo)
+cat("Approximate Bayes Factor (Model2 vs Model1) from LOO:", round(BF21_loo,3), "\n")
+
+
+
+BF_{12} ≈ exp((WAIC1 − WAIC2)/2)
+# or equivalently
+BF21_waic_corrected <- exp(-delta_waic/2)
+
+2)
+
+
+
+```
+
+
+
+
+
+
+
+

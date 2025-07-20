@@ -17,6 +17,7 @@ library(dplyr)
 library(tidyr)
 library(stringr)   
 library(posterior)  
+library(coda)
 ```
 
 ```{r}
@@ -162,8 +163,7 @@ y      <- model_dat_1$y
 y <- ifelse(is.na(y)==TRUE, 0, y)
 
 
-
-
+X = as.matrix(covars[,2:12])
 
 y_vec    <- as.numeric(model_dat_1$y)       # 0/1 → double
 X_mat    <- as.matrix(model_dat_1$X)        # should already be numeric, but just in case:
@@ -213,6 +213,26 @@ X_scaled <- scale(X_mat)  # standardize for numerical stability
 
 # Otherwise, if X_mat might have extra columns, trim it:
 # X_scaled <- scale(X_mat[, 1:11])
+data <- X_mat2
+
+constants <- list(
+  N = N,
+  P = P,
+  S = S,
+  X = X_scaled,
+  season = model_dat_1$season
+)
+
+inits <- function() {
+  list(
+    beta0 = rnorm(1, -2.5, 1),                  
+    beta = rnorm(P, 0, 1),                      
+    sigma_alpha = runif(1, 0.2, 1),           
+    alpha = rnorm(S, 0, 0.5)                  
+  )
+}
+
+
 
 # Step 3: Model definition
 model_code <- nimbleCode({
@@ -282,7 +302,64 @@ effectiveSize(samples)
 
 # Traceplots
 traceplot(samples[, "sigma_alpha"])
-traceplot(samples[, c("beta0", "beta[1]", "beta[2]", "beta[3]", "beta[4]", "beta[5]", "beta[6]", "beta[7]", "beta[8]", "beta[9]", "beta[10]", "beta[11]")])
+traceplot(samples[, c("sigma_alpha", "beta0", "beta[1]", "beta[2]", "beta[3]", "beta[4]", "beta[5]", "beta[6]", "beta[7]", "beta[8]", "beta[9]", "beta[10]", "beta[11]")])
+
+
+
+
+
+# Step 1: Get variable names
+alpha_indices <- grep("^alpha\\[", varnames(samples2), value = TRUE)
+
+# Step 2: Set up plotting area
+par(mfrow = c(6, 8), mar = c(2, 2, 2, 1))
+
+# Step 3: Loop through each alpha parameter and plot
+for (param_name in alpha_indices) {
+  traceplot(samples[, which(varnames(samples2) == param_name)], main = param_name)
+}
+
+
+
+par(mfrow = c(3,4))
+beta_indices <- grep("^beta\\[", varnames(samples), value = TRUE)
+traceplot(samples[, "beta0"])
+for (param_name in beta_indices) {
+  traceplot(samples[, which(varnames(samples) == param_name)], main = param_name)
+}
+
+
+par(mfrow = c(3,4))
+beta_indices <- grep("^beta\\[", varnames(samples), value = TRUE)
+traceplot(samples[, "beta0"])
+for (param_name in beta_indices) {
+  acfplot(samples[, which(varnames(samples) == param_name)], main = param_name)
+}
+
+
+
+
+
+traceplot(samples[, "beta0"], main="Traceplot for beta_0")
+
+acfplot(samples[, "beta0"], main="Autocorrelation of MCMC Model 1")  # From coda
+
+
+# Extract samples for one parameter
+beta0_samples <- as.matrix(samples)[, "beta0"]
+
+# Compute running mean
+running_avg <- cumsum(beta0_samples) / seq_along(beta0_samples)
+
+# Plot
+plot(running_avg, type = "l",
+     ylab = "Running Average", xlab = "Iteration",
+     main = "Running Average of beta0")
+abline(h = mean(beta0_samples), col = "red", lty = 2)  # true mean line
+
+
+
+
 
 ```
 
@@ -363,6 +440,7 @@ Model 2:
 P <- ncol(X)
 N <- nrow(X_scaled)
 S <- length(unique(X_mat2$X2))
+data <- X_mat2
 
 constants2 <- list(
   N = N,
@@ -497,8 +575,49 @@ samples2 <- runMCMC(
 
 summary(samples2)
 effectiveSize(samples2)
-traceplot(samples2[, c("beta0", "beta[1]", "beta_z", "sigma_alpha")])
+# rhat(samples2)
 
+
+traceplot(samples2[, c("beta0", "beta[1]", "beta_z", "sigma_alpha")])
+traceplot(samples2[, "beta0"])
+
+acfplot(samples2[, "beta_z"])  # From coda
+
+
+# Extract samples for one parameter
+beta0_samples <- as.matrix(samples2)[, "beta_z"]
+
+# Compute running mean
+running_avg <- cumsum(beta0_samples) / seq_along(beta0_samples)
+
+# Plot
+plot(running_avg, type = "l",
+     ylab = "Running Average", xlab = "Iteration",
+     main = "Running Average of beta_z")
+abline(h = mean(beta0_samples), col = "red", lty = 2)  # true mean line
+
+
+
+
+
+# Step 1: Get variable names
+alpha_indices <- grep("^alpha\\[", varnames(samples2), value = TRUE)
+
+# Step 2: Set up plotting area
+par(mfrow = c(6, 8), mar = c(2, 2, 2, 1))
+
+# Step 3: Loop through each alpha parameter and plot
+for (param_name in alpha_indices) {
+  traceplot(samples2[, which(varnames(samples2) == param_name)], main = param_name)
+}
+
+
+par(mfrow = c(3,4))
+beta_indices <- grep("^beta\\[", varnames(samples2), value = TRUE)
+traceplot(samples2[, "beta0"])
+for (param_name in beta_indices) {
+  traceplot(samples2[, which(varnames(samples2) == param_name)], main = param_name)
+}
 
 
 ```
@@ -514,6 +633,108 @@ traceplot(samples2[, c("beta0", "beta[1]", "beta_z", "sigma_alpha")])
 
 
 
+MODEL COMPARISON
+
+
+WAIC/LOO Bar-chart: Bar‐plot of WAIC (or -2 × ELPD) for each model, ordered from best → worst.
+
+```{r}
+library(nimble)
+library(coda)
+library(loo)
+library(matrixStats)
+
+get_log_lik_matrix_fast <- function(Rmodel, samples, compiled_model, data_node = "y") {
+  # Get full sample matrix
+  samples_mat <- as.matrix(as.mcmc.list(samples))
+  n_samples <- nrow(samples_mat)
+  log_lik_nodes <- Rmodel$expandNodeNames(data_node)
+  n_obs <- length(log_lik_nodes)
+  
+  log_lik_matrix <- matrix(NA_real_, nrow = n_samples, ncol = n_obs)
+  
+  param_names <- intersect(colnames(samples_mat), names(compiled_model$getNodeNames(includeData = FALSE)))
+
+  for (i in seq_len(n_samples)) {
+    # Vectorized assignment of parameters
+    nimble::values(compiled_model, param_names) <- samples_mat[i, param_names]
+    
+    # Calculate all likelihoods in one call
+    compiled_model$calculate(log_lik_nodes)
+    log_lik_matrix[i, ] <- compiled_model$getLogProb(log_lik_nodes)
+  }
+
+  return(log_lik_matrix)
+}
+
+
+# Compute for both models
+log_lik_model1 <- get_log_lik_matrix_fast(Rmodel, samples, Cmodel)
+log_lik_model2 <- get_log_lik_matrix(Rmodel2, samples2, Cmodel2)
+
+
+
+
+
+
+waic1 <- waic(log_lik_model1)
+waic2 <- waic(log_lik_model2)
+
+loo1 <- loo(log_lik_model1)
+loo2 <- loo(log_lik_model2)
+
+print(waic1)
+print(waic2)
+print(loo1)
+print(loo2)
+
+
+
+
+#BAYES FACTORS
+lppd1 <- sum(log(colMeans(exp(log_lik_model1))))
+lppd2 <- sum(log(colMeans(exp(log_lik_model2))))
+bf_12 <- exp(lppd1 - lppd2)
+cat("Approximate Bayes Factor (Model 1 vs Model 2):", bf_12, "\n")
+
+
+```
+
+
+
+
+
+
+```{r}
+extract_loglik_matrix <- function(Cmodel, samples_mat, loglik_nodes) {
+  n_samples <- nrow(samples_mat)
+  n_obs <- length(loglik_nodes)
+  loglik_mat <- matrix(NA_real_, nrow = n_samples, ncol = n_obs)
+
+  for (i in seq_len(n_samples)) {
+    for (param in colnames(samples_mat)) {
+      # Safely assign parameter
+      try({
+        Cmodel[[param]] <- samples_mat[i, param]
+      }, silent = TRUE)
+    }
+
+    for (j in seq_len(n_obs)) {
+      node <- loglik_nodes[j]
+      result <- try(Cmodel$calculate(node), silent = TRUE)
+
+      if (!inherits(result, "try-error") && !is.na(result)) {
+        loglik_mat[i, j] <- Cmodel$getLogProb(node)
+      } else {
+        loglik_mat[i, j] <- NA_real_
+      }
+    }
+  }
+
+  return(loglik_mat)
+}
+
+```
 
 
 
@@ -526,33 +747,106 @@ traceplot(samples2[, c("beta0", "beta[1]", "beta_z", "sigma_alpha")])
 
 
 
+MODEL 1
+```{r}
+
+library(nimble)
+library(loo)
+library(bridgesampling)
+library(coda)
+
+# Step 9: Run MCMC
+samples <- runMCMC(Cmcmc,
+  niter             = 2000,
+  nburnin           = 1000,
+  nchains           = 1,
+  thin              = 1,
+  samplesAsCodaMCMC = TRUE,
+  setSeed           = TRUE,
+)
+
+# Step 10: Diagnostics
+samples_mcmc <- as.mcmc.list(samples)
+
+samples_mat1 <- as.matrix(as.mcmc.list(samples))
+loglik_nodes1 <- Rmodel$expandNodeNames("y")  # or use full node names if needed
+loglik_mat1 <- extract_loglik_matrix(Cmodel, samples_mat1, loglik_nodes1)
+waic1 <- waic(loglik_mat1)
+loo1 <- loo(loglik_mat1)
+
+```
+
+
+MODEL 2
+```{r}
+Cmodel2 <- compileNimble(Rmodel2)
+samples2 <- runMCMC(
+  Cmcmc2,
+  niter = 2000,
+  nburnin = 1000,
+  nchains = 1,
+  thin = 1,
+  samplesAsCodaMCMC = TRUE,
+  setSeed = TRUE
+)
+
+# Step 10: Diagnostics
+samples_mcmc <- as.mcmc.list(samples2)
+
+samples_mat2 <- as.matrix(as.mcmc.list(samples2))
+loglik_nodes2 <- Rmodel2$expandNodeNames("y")  # or use full node names if needed
+loglik_mat2 <- extract_loglik_matrix(Cmodel2, samples_mat2, loglik_nodes2)
+loglik_mat2 <- ifelse(is.na(loglik_mat2), 0, loglik_mat2)
+waic2 <- waic(loglik_mat2)
+loo2 <- loo(loglik_mat2)
+
+
+```
+
+
+
+
+```{r}
+# ∆LOO and ∆WAIC (Model 2 - Model 1)
+delta_waic <- waic2$estimates["waic", "Estimate"] - waic1$estimates["waic", "Estimate"]
+delta_loo <- loo2$estimates["elpd_loo", "Estimate"] - loo1$estimates["elpd_loo", "Estimate"]
+
+cat("Delta WAIC (Model2 - Model1):", delta_waic, "\n")
+cat("Delta LOO (Model2 - Model1):", delta_loo, "\n")
+
+# 5. Approximate Bayes Factor (bridge sampling)
+bridge1 <- bridge_sampler(samples = samples_mat1, log_posterior = function(x) Cmodel$calculate(), data = list())
+bridge2 <- bridge_sampler(samples = samples_mat2, log_posterior = function(x) Cmodel2$calculate(), data = list())
+
+bf_21 <- bf(bridge2, bridge1)
+print(bf_21)
+```
 
 
 
 
 
+```{r}
+# assume you've already computed:
+# waic1 <- waic(loglik_mat1)
+# waic2 <- waic(loglik_mat2)
+
+waic1_val <- waic1$estimates["waic","Estimate"]
+waic2_val <- waic2$estimates["waic","Estimate"]
+delta_waic <- waic2_val - waic1_val
+
+BF21_waic <- exp(delta_waic / 2)
+cat("Approximate Bayes Factor (Model2 vs Model1) from WAIC:", round(BF21_waic,3), "\n")
+
+loo1_val <- loo1$estimates["elpd_loo","Estimate"]
+loo2_val <- loo2$estimates["elpd_loo","Estimate"]
+delta_loo <- loo2_val - loo1_val
+
+BF21_loo <- exp(delta_loo)
+cat("Approximate Bayes Factor (Model2 vs Model1) from LOO:", round(BF21_loo,3), "\n")
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+BF_{12} ≈ exp((WAIC1 − WAIC2)/2)
+# or equivalently
+BF21_waic_corrected <- exp(-delta_waic/2)
